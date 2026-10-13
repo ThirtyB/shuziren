@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Layers, Target, Users } from "lucide-react";
 import type {
   DispatchMode,
@@ -265,6 +265,23 @@ export default function ConsoleRoute() {
     const timer = window.setInterval(refreshRun, 1500);
     return () => window.clearInterval(timer);
   }, [run?.run_id, run?.state, latestRunId]);
+
+  // 当前 run 从"进行中"变为结束（completed/failed）时，触发**一次**历史列表
+  // 刷新，使历史条目里的状态与进度和后端对齐。
+  // 任务进行中不做任何历史刷新：避免列表在跑的过程中持续抖动 / 图标一直转。
+  const prevRunStateRef = useRef<{ id: string; state: RunStatus["state"] } | null>(null);
+  useEffect(() => {
+    const current = run ? { id: run.run_id, state: run.state } : null;
+    const prev = prevRunStateRef.current;
+    prevRunStateRef.current = current;
+    if (!current || !prev) return;
+    // 切换到别的 run 时不算"任务结束"，不触发刷新。
+    if (prev.id !== current.id) return;
+    if (prev.state === current.state) return;
+    if (current.state === "completed" || current.state === "failed") {
+      setRefreshTick((value) => value + 1);
+    }
+  }, [run?.run_id, run?.state]);
 
   const scenario = SCENARIO_TABS.find((item) => item.key === dispatchMode);
   const subtitle = scenario

@@ -16,9 +16,6 @@ const STATE_LABEL: Record<RunHistoryEntry["state"], string> = {
   failed: "失败",
 };
 
-/** 历史列表的轮询间隔（毫秒）。足够短以让新 run 及时出现在列表上。 */
-const POLL_INTERVAL_MS = 4000;
-
 /**
  * 折叠式"历史运行"面板：拉取 ``/api/runs``，按 run_id 显示近 50 条。
  *
@@ -28,13 +25,12 @@ const POLL_INTERVAL_MS = 4000;
  *  * 用户可以删除历史 run：调 ``DELETE /api/runs/{run_id}`` 把整目录
  *    ``outputs/web_runs/{run_id}/`` 一起删掉。
  *
- * 刷新策略（修 Bug：历史不会自动刷新 / 刷新按钮无效）：
- *  * 头部 ``RefreshCcw`` 图标现在是一个**真正可点击**的按钮，点击会
- *    立即重新拉一次。
- *  * 组件内部用 ``setInterval`` 每 ``POLL_INTERVAL_MS`` 拉一次，
- *    这样新 run 提交后无需父组件"手动 +1 refreshTick"也能及时出现。
- *  * 监听 ``document.visibilityState``：切到后台时停止轮询避免空跑，
- *    切回前台时立即拉一次。
+ * 刷新策略（**只拉取，不轮询**）：
+ *  * 初始挂载时拉一次；父组件 ``refreshTick`` 变化时拉一次。
+ *  * 父组件在"新 run 提交"和"当前 run 结束（completed/failed）"时把
+ *    ``refreshTick`` +1，因此**任务进行中列表不会持续刷新**，只在
+ *    任务结束后刷新一次。
+ *  * 头部 ``RefreshCcw`` 图标是真正可点击的按钮，用户想手动刷新时点它。
  *
  * ``activeRunId`` 是"当前正在显示的 run"——可以是正在跑的那条，也可以是
  * 用户从历史里挑出来的旧 run。
@@ -48,7 +44,7 @@ export function RunHistoryPanel({
 }: {
   activeRunId: string;
   onSelectRun: (entry: RunHistoryEntry) => void;
-  /** 来自父组件的"数据版本号"，每次新发起 run 都会 +1，触发刷新。 */
+  /** 来自父组件的"数据版本号"：提交新 run / run 结束时会 +1，触发刷新。 */
   refreshTick: number;
   /** 删完一条后回调；父组件用来更新 activeRunId（如果删的正是它）。 */
   onAfterDelete?: (deletedRunId: string, remaining: RunHistoryEntry[]) => void;
@@ -60,7 +56,7 @@ export function RunHistoryPanel({
   const [error, setError] = useState("");
   const [open, setOpen] = useState(true);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
-  // 内部"再拉一次"信号：刷新按钮和 visibility 切回前台都会触发它。
+  // 内部"再拉一次"信号：点击刷新按钮时 +1。
   const [manualTick, setManualTick] = useState(0);
   // in-flight 标记：避免上一次请求未返回时被新的请求覆盖。
   const inFlightRef = useRef(false);
@@ -83,31 +79,12 @@ export function RunHistoryPanel({
       });
   }, []);
 
-  // 触发条件：父组件 refreshTick 变化（提交新 run）、内部手动点击、
-  // 页面从后台切回前台。轮询则由下方 setInterval 负责。
+  // 只在"挂载 / refreshTick 变化 / 手动点刷新"时拉取。
+  // 不做定时轮询：任务进行中历史列表保持稳定，任务结束后由父组件
+  // 把 refreshTick +1 触发这一次刷新。
   useEffect(() => {
     refreshNow();
   }, [refreshTick, manualTick, refreshNow]);
-
-  // 自动轮询：仅在前台时拉。
-  useEffect(() => {
-    if (typeof document === "undefined") return;
-    const handleVisibility = () => {
-      if (document.visibilityState === "visible") {
-        setManualTick((value) => value + 1);
-      }
-    };
-    document.addEventListener("visibilitychange", handleVisibility);
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") {
-        refreshNow();
-      }
-    }, POLL_INTERVAL_MS);
-    return () => {
-      document.removeEventListener("visibilitychange", handleVisibility);
-      window.clearInterval(timer);
-    };
-  }, [refreshNow]);
 
   async function handleDelete(entry: RunHistoryEntry, event: React.MouseEvent) {
     event.stopPropagation();

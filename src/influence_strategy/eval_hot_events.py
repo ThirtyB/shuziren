@@ -5,16 +5,15 @@ import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from .llm_client import LLMClientError, OpenAICompatibleLLMClient
-from .models import StrategyNodePlan, StrategyResult
+from .models import NodeScore, ScoreResult, SelectedNode, StrategyNodePlan, StrategyResult
 from .pipeline import PipelineArtifacts, StrategyPipeline
 from .platform_dispatcher import (
     MultiPlatformDispatchResult,
     PlatformDispatcher,
     PlatformSpec,
-    to_json_dict,
 )
 from .platform_profiles import (
     DATASET_PLATFORM_VALUES,
@@ -22,6 +21,13 @@ from .platform_profiles import (
     is_valid_dataset_platform,
     normalize_platform_key,
 )
+from .selector import (
+    DEFAULT_DISPATCH_STAGE,
+    DEFAULT_SELECTED_ROLE,
+    ROLE_HINT_TO_DISPATCH_STAGE,
+    ROLE_HINT_TO_SELECTED_ROLE,
+)
+from .strategy_generator import StrategyGenerator
 
 TRACE_PREVIEW_LIMIT = 25
 
@@ -63,13 +69,16 @@ RUN_SUMMARY_FILENAME = "run_summary.json"
 RUN_ERROR_FILENAME = "run_error.json"
 
 # --------------------------------------------------------------------------- #
-# 多平台模式的独立输出契约
+# 跨平台分发的输出契约（与多人分发共用五维结构）
 # --------------------------------------------------------------------------- #
-# 多平台分发与旧版单平台模拟分发是两条业务线，最终业务 JSON 不共用 payload：
-# 多平台输出只由 ``build_multiplatform_output`` 独立构造，顶层仅有事件基本信息、
-# 多平台版本标识与 ``MULTIPLATFORM_STRATEGY_KEY``；旧版五维调度策略（单平台模拟
-# 分发的数字人选取、帖子内容与动作清单）属于另一条业务线，不写入多平台文件。
-MULTIPLATFORM_STRATEGY_KEY = "多平台分发策略"
+# 多平台分发（cross_platform）与多人分发共用**同一套**最终业务 JSON 契约：
+# 顶层都是 ``事件名称`` / ``输出格式版本`` / ``五维调度策略``，五个维度的字段名
+# 完全一致，因此前端可以复用同一套渲染组件，执行者也能用同一套读法消费。
+#
+# 差异只落在「平台」维度：多平台模式在 ``五维调度策略.平台`` 下额外输出
+# ``跨平台总览`` 与 ``各平台方案``（每个平台各自的人数、缺口、安全等级、内容
+# 计划与时间计划），把平台差异集中到一处，而不是散在顶层的说明文本里。
+FIVE_DIMENSION_STRATEGY_KEY = "五维调度策略"
 #: 多平台最终业务 JSON 的输出版本标识（区别于旧版 ``action_schema_v5_...``）。
 MULTIPLATFORM_OUTPUT_FORMAT_VERSION = "action_schema_v6_multi_platform_minimal"
 MULTIPLATFORM_DRAFT_NOTE = (
@@ -78,10 +87,17 @@ MULTIPLATFORM_DRAFT_NOTE = (
     "不是由一次整体选取结果拆分而来，也未使用旧 Selector 的 max_selected_nodes 作为平台人数。"
 )
 MULTIPLATFORM_SCOPE_NOTE = (
-    "本文件是多平台分发模式的最终业务结果，只包含 PlatformDispatcher 的跨平台调度结果；"
-    "旧版单平台模拟分发的策略结果不会写入本文件，避免两种模式的业务结果混在同一份输出里。"
-    "需要旧版策略时，请运行不指定 --platforms 的多人分发，或使用 --target-user-id 的定向分发。"
+    "本文件是多平台分发模式的最终业务结果：五维调度策略的结构与多人分发一致，"
+    "但数字人由 PlatformDispatcher 按平台分别选取，不再经过旧版单平台模拟分发的整体选人；"
+    "各平台的选人依据、安全等级、内容计划与时间计划集中在「平台」维度，便于逐平台核对。"
 )
+
+#: ``NodeScore.priority_tier`` → 动作优先级，与 ``Selector._dispatch_priority`` 同源。
+PRIORITY_TIER_TO_DISPATCH_PRIORITY: dict[str, str] = {
+    "high": "p1",
+    "medium": "p2",
+    "low": "p3",
+}
 
 
 def load_hot_events(input_path: str | Path) -> list[dict[str, Any]]:
@@ -646,17 +662,22 @@ def _run_hot_event_multiplatform_evaluation(
         target_user_id=None,
     )
 
-    # 多平台模式的最终业务结果必须独立构造：这里不再调用 build_eval_output，
-    # 因此不会生成旧版五维调度策略，也不会把它包装进多平台输出。
+    # 跨平台模式同样产出五维调度策略：先由 PlatformDispatcher 按平台独立选人，
+    # 再把选人结果翻译回策略节点，复用 build_eval_output 同一套节点规划与动作生成，
+    # 保证两种模式的动作口径、阶段口径与内容来源完全一致。
     dispatch_result = PlatformDispatcher().dispatch(
         score_result=artifacts.score_result,
         platform_specs=platform_specs,
         campaign_window_hours=campaign_window_hours,
     )
-    output_payload = build_multiplatform_output(
+    output_payload, content_llm_meta = build_multiplatform_output(
         hot_event=hot_event,
         strategy_result=artifacts.strategy_result,
         dispatch_result=dispatch_result,
+        score_result=artifacts.score_result,
+        workspace_root=root,
+        use_llm=use_llm,
+        llm_client=client,
     )
 
     target_dir = Path(output_dir)
@@ -682,9 +703,9 @@ def _run_hot_event_multiplatform_evaluation(
         artifacts=artifacts,
         final_output=output_payload,
         output_path=output_path,
-        # 多平台模式不调用旧版 LLM 帖子生成，因此没有内容生成诊断可写；
-        # 不传该参数时 trace 不会生成 08_content_generation_meta.json，
-        # 而不是把规则兜底误报成真实的内容来源。
+        # 跨平台模式现在也会为选中节点生成正文，因此同样写入内容生成诊断，
+        # 让 trace 能区分正文来自 LLM 还是规则兜底。
+        content_llm_meta=content_llm_meta,
         run_label=f"multiplatform_{platform_tag}",
     )
     return output_path, output_payload
@@ -695,28 +716,309 @@ def build_multiplatform_output(
     hot_event: dict[str, Any],
     strategy_result: StrategyResult,
     dispatch_result: MultiPlatformDispatchResult,
-) -> dict[str, Any]:
-    """独立构造多平台模式的最终业务输出。
+    score_result: ScoreResult,
+    workspace_root: str | Path | None = None,
+    use_llm: bool = True,
+    llm_client: Any | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """构造跨平台分发的最终业务输出（与多人分发共用五维结构）。
 
-    与 :func:`build_eval_output`（旧版五维调度策略）完全解耦：本函数只读取
-    ``PlatformDispatcher`` 的真实调度结果，不生成也不引用任何旧版单平台业务
-    结果，因此多平台 JSON 不可能混入旧版多人分发的数字人、帖子内容与动作清单。
+    输出契约与 :func:`build_eval_output` 一致：顶层为事件名称、输出版本标识与
+    ``五维调度策略``，五个维度（目标对象 / 时间 / 频率 / 平台 / 内容）的字段名
+    一一对应，因此前端可以复用同一套渲染组件。
 
-    顶层字段固定为三项：事件基本信息、多平台输出版本标识与
-    ``MULTIPLATFORM_STRATEGY_KEY``。多平台的评分依据、安全层级、角色分配、
-    内容计划、时间计划、人数与跨平台重复用户统计都在该字段内部原样保留。
+    差异只落在「平台」维度：额外输出 ``跨平台总览`` 与 ``各平台方案``，把每个平台
+    独立选人的人数、缺口、安全等级、内容计划与时间计划集中到一处。
+
+    节点级内容与多人分发同源：``PlatformDispatcher`` 选出的数字人先按
+    ``source_role_hint`` 翻译回策略角色（见 :mod:`selector` 的映射表），再由
+    ``StrategyGenerator`` 补齐阶段/频率/内容风格，最后复用同一个动作生成器产出
+    动作清单，避免两种模式各写一套而慢慢漂移。
     """
 
-    multiplatform_block = to_json_dict(dispatch_result)
-    multiplatform_block["内容草案说明"] = MULTIPLATFORM_DRAFT_NOTE
-    multiplatform_block["结果范围说明"] = MULTIPLATFORM_SCOPE_NOTE
-    return {
+    selected_nodes = _selected_nodes_from_dispatch(
+        dispatch_result=dispatch_result,
+        score_result=score_result,
+        strategy_result=strategy_result,
+    )
+    selected_ids = [node.user_id for node in selected_nodes]
+    target = str(
+        hot_event.get("target")
+        or strategy_result.event.target_goal
+        or "扩大热点信息触达并引导理性讨论"
+    ).strip()
+    variants = _normalize_variants(hot_event.get("opinion_variants", []))
+
+    # LLM 只认 strategy_result.selected_nodes；跨平台选的人与整体选人不同，因此传
+    # 一份"选中节点已替换为平台选人结果"的副本，其余策略上下文保持原样。
+    llm_strategy_result = strategy_result.model_copy(
+        update={"selected_nodes": selected_nodes}
+    )
+    llm_overrides, content_llm_meta = _build_llm_node_texts(
+        hot_event=hot_event,
+        strategy_result=llm_strategy_result,
+        platform="、".join(item.display_name for item in dispatch_result.platforms)
+        or dispatch_result.dispatch_mode,
+        target=target,
+        workspace_root=workspace_root,
+        use_llm=use_llm,
+        llm_client=llm_client,
+        platform_for=_dispatch_platform_of_node,
+    )
+
+    # 协同对象只在**同一平台内**寻找：各平台独立排期执行，跨平台挂接动作既不
+    # 符合这一前提，也会让动作指向另一个平台的帖子。
+    peers_by_platform: dict[str, list[StrategyNodePlan]] = {}
+    for node in selected_nodes:
+        peers_by_platform.setdefault(_dispatch_platform_of_node(node), []).append(node)
+
+    node_outputs, post_refs, _ = _build_node_outputs(
+        hot_event=hot_event,
+        strategy_result=strategy_result,
+        selected_nodes=selected_nodes,
+        target=target,
+        variants=variants,
+        llm_overrides=llm_overrides,
+        platform_for=_dispatch_platform_of_node,
+        peer_nodes_for=lambda node: peers_by_platform.get(
+            _dispatch_platform_of_node(node), [node]
+        ),
+    )
+
+    platform_item_fields = {
+        item.user_id: {
+            "平台角色": item.platform_role,
+            "节点角色": ROLE_HINT_TO_SELECTED_ROLE.get(
+                item.source_role_hint, DEFAULT_SELECTED_ROLE
+            ),
+            "选取名次": item.selection_rank,
+            "安全等级": item.safety_tier,
+            "平台适配分": item.platform_fit_score,
+            "平台调度分": item.platform_dispatch_score,
+        }
+        for platform_result in dispatch_result.platforms
+        for item in platform_result.selected_nodes
+    }
+
+    five_dimension_strategy = _build_five_dimension_strategy(
+        strategy_result=strategy_result,
+        selected_nodes=selected_nodes,
+        selected_ids=selected_ids,
+        platform=dispatch_result.dispatch_mode,
+        target=target,
+        post_refs=post_refs,
+        node_outputs=node_outputs,
+        platform_item_fields=platform_item_fields,
+        platform_extra={
+            "跨平台总览": _build_cross_platform_overview(dispatch_result),
+            "各平台方案": _build_platform_schemes(dispatch_result),
+        },
+    )
+    five_dimension_strategy["内容"]["内容生成诊断"] = _compact_content_llm_meta(
+        content_llm_meta
+    )
+
+    payload = {
         "事件名称": str(
             hot_event.get("event_title") or strategy_result.event.event_title
         ),
         "输出格式版本": MULTIPLATFORM_OUTPUT_FORMAT_VERSION,
-        MULTIPLATFORM_STRATEGY_KEY: multiplatform_block,
+        FIVE_DIMENSION_STRATEGY_KEY: five_dimension_strategy,
     }
+    return payload, content_llm_meta
+
+
+def _selected_nodes_from_dispatch(
+    *,
+    dispatch_result: MultiPlatformDispatchResult,
+    score_result: ScoreResult,
+    strategy_result: StrategyResult,
+) -> list[StrategyNodePlan]:
+    """把各平台的选人结果翻译成多人分发使用的 ``StrategyNodePlan``。
+
+    ``PlatformNodeAssignment`` 只携带排序与安全字段，缺少行动级字段
+    （阶段 / 频率 / 内容风格）。这里按 ``source_role_hint`` 恢复角色与阶段，再交给
+    ``StrategyGenerator`` 用**同一个策略上下文**补齐其余字段，使跨平台输出的动作
+    清单与多人分发逐字段同源，而不是各推一套。
+    """
+
+    node_score_by_id = {node.user_id: node for node in score_result.node_scores}
+    generator = StrategyGenerator()
+    plans: list[StrategyNodePlan] = []
+    for platform_result in dispatch_result.platforms:
+        for assignment in platform_result.selected_nodes:
+            base = node_score_by_id.get(assignment.user_id)
+            if base is None:
+                # PlatformDispatcher 只从 score_result 的候选池里选人，正常不会发生；
+                # 显式报错优于静默产出一个缺画像、缺策略依据的节点。
+                raise ValueError(
+                    f"跨平台调度结果中的数字人 {assignment.user_id} 不在本次评分结果内，"
+                    "无法复用多人分发的节点规划逻辑。"
+                )
+            role_hint = assignment.source_role_hint or base.role_hint
+            selected_node = SelectedNode(
+                **base.model_dump(),
+                selection_rank=assignment.selection_rank,
+                selected_role=ROLE_HINT_TO_SELECTED_ROLE.get(
+                    role_hint, DEFAULT_SELECTED_ROLE
+                ),
+                dispatch_stage=ROLE_HINT_TO_DISPATCH_STAGE.get(
+                    role_hint, DEFAULT_DISPATCH_STAGE
+                ),
+                dispatch_priority=PRIORITY_TIER_TO_DISPATCH_PRIORITY.get(
+                    str(getattr(base, "priority_tier", "") or ""), "p3"
+                ),
+                selection_bucket="primary",
+            )
+            plans.append(
+                generator.build_node_plan_from_strategy(
+                    node=selected_node,
+                    strategy=strategy_result.strategy,
+                    bucket="primary",
+                )
+            )
+    return plans
+
+
+def _dispatch_platform_of_node(node: StrategyNodePlan) -> str:
+    """输出用的平台口径：统一取数据集写法（如 ``facebook_simulated``）。
+
+    与 :func:`build_eval_output` 相同，避免同一份 JSON 里同时出现
+    ``facebook`` 与 ``facebook_simulated`` 两套平台写法。
+    """
+
+    platform = node.platform or ""
+    if is_valid_dataset_platform(platform):
+        return dataset_platform_value(platform)
+    return platform
+
+
+def _safety_tier_distribution(tiers: Any) -> dict[str, int]:
+    """把安全层级计数渲染成中文键，与五维调度策略的其余字段保持同一语言。"""
+
+    return {
+        "合格": int(getattr(tiers, "safe", 0)),
+        "待人工复核": int(getattr(tiers, "review_required", 0)),
+        "未通过资格筛选": int(getattr(tiers, "not_eligible", 0)),
+    }
+
+
+def _build_cross_platform_overview(
+    dispatch_result: MultiPlatformDispatchResult,
+) -> dict[str, Any]:
+    """跨平台级汇总：人数、缺口、安全等级与跨平台告警。"""
+
+    # PlatformDispatcher 会把每平台告警加 ``[平台]`` 前缀后聚合到顶层；不带前缀的
+    # 才是真正的跨平台告警（合格缺口、重复数字人等），据此区分避免重复展示。
+    cross_platform_warnings = [
+        str(warning)
+        for warning in dispatch_result.warnings
+        if not str(warning).startswith("[")
+    ]
+    return {
+        "调度模式": dispatch_result.dispatch_mode,
+        "活动窗口小时": dispatch_result.campaign_window_hours,
+        "平台数": len(dispatch_result.platforms),
+        "目标人数合计": dispatch_result.total_requested_count,
+        "选取人数合计": dispatch_result.total_selected_count,
+        "去重数字人数": dispatch_result.unique_user_count,
+        "合格缺口合计": dispatch_result.total_safe_shortfall_count,
+        "安全等级分布": _safety_tier_distribution(
+            dispatch_result.total_selected_safety_tiers
+        ),
+        "跨平台重复数字人": list(dispatch_result.overlapping_user_ids),
+        "跨平台提示": cross_platform_warnings,
+        "内容草案说明": MULTIPLATFORM_DRAFT_NOTE,
+        "结果范围说明": MULTIPLATFORM_SCOPE_NOTE,
+    }
+
+
+def _build_platform_schemes(
+    dispatch_result: MultiPlatformDispatchResult,
+) -> list[dict[str, Any]]:
+    """逐平台方案：人数与安全等级、内容计划、时间计划与平台级提示。"""
+
+    schemes: list[dict[str, Any]] = []
+    for platform_result in dispatch_result.platforms:
+        content_plan = platform_result.content_plan
+        time_plan = platform_result.time_plan
+        schemes.append(
+            {
+                "平台": platform_result.platform_key,
+                "平台名称": platform_result.display_name,
+                "目标人数": platform_result.requested_count,
+                "选取人数": platform_result.selected_count,
+                "人数缺口": platform_result.shortfall_count,
+                "合格缺口": platform_result.safe_shortfall_count,
+                "安全等级分布": _safety_tier_distribution(
+                    platform_result.selected_safety_tiers
+                ),
+                "活动窗口小时": time_plan.campaign_window_hours,
+                "选取数字人id组": [
+                    item.user_id for item in platform_result.selected_nodes
+                ],
+                "平台角色配置": list(platform_result.platform_roles),
+                # 逐节点保留完整的选人与安全依据：五维表里给的是精简概览，
+                # 这里是可追溯的明细，避免对齐结构时丢掉评分依据。
+                "选取节点明细": [
+                    {
+                        "数字人id": item.user_id,
+                        "数字人名称": item.user_name,
+                        "分发平台": item.platform,
+                        "选取名次": item.selection_rank,
+                        "平台角色": item.platform_role,
+                        "节点角色": ROLE_HINT_TO_SELECTED_ROLE.get(
+                            item.source_role_hint, DEFAULT_SELECTED_ROLE
+                        ),
+                        "原始角色提示": item.source_role_hint,
+                        "安全等级": item.safety_tier,
+                        "综合分": item.final_score,
+                        "主题匹配分": item.topic_match_score,
+                        "影响力分": item.influence_score,
+                        "扩散分": item.diffusion_score,
+                        "稳定分": item.stability_score,
+                        "活跃分": item.activity_score,
+                        "平台适配分": item.platform_fit_score,
+                        "平台调度分": item.platform_dispatch_score,
+                        "适配依据": list(item.fit_basis),
+                        "未声明输入": list(item.undeclared_inputs),
+                        "风险等级": item.risk_level,
+                        "资格通过": item.eligible,
+                        "人工复核": item.manual_review_required,
+                        "风险标记": list(item.risk_flags),
+                    }
+                    for item in platform_result.selected_nodes
+                ],
+                "内容形态": list(content_plan.content_modes),
+                "写作指引": [
+                    {
+                        "环节标识": section.section_key,
+                        "环节": section.label,
+                        "写作指引": section.guidance,
+                    }
+                    for section in content_plan.sections
+                ],
+                "内容护栏": list(content_plan.guardrails),
+                "时间阶段": [
+                    {
+                        "阶段标识": stage.stage_key,
+                        "阶段": stage.label,
+                        "时间窗": stage.window,
+                        "开始小时": stage.start_hour,
+                        "结束小时": stage.end_hour,
+                        "重点": stage.focus,
+                    }
+                    for stage in time_plan.stages
+                ],
+                "节奏建议": list(time_plan.cadence_notes),
+                "阶段说明": time_plan.stage_schedule_note,
+                "平台提示": list(platform_result.warnings),
+                "免责声明": platform_result.policy_disclaimer,
+                "适配限制": list(platform_result.fit_limitations),
+                "适配方法": platform_result.fit_method,
+            }
+        )
+    return schemes
 
 
 def build_eval_output(
@@ -753,83 +1055,15 @@ def build_eval_output(
         llm_client=llm_client,
     )
 
-    node_outputs: dict[str, dict[str, Any]] = {}
-    post_refs = {
-        node.user_id: f"P{index:03d}"
-        for index, node in enumerate(selected_nodes, start=1)
-    }
-    publish_action_ids = {
-        node.user_id: f"A{((index - 1) * 4) + 1:03d}"
-        for index, node in enumerate(selected_nodes, start=1)
-    }
-
-    for index, node in enumerate(selected_nodes, start=1):
-        fallback_content = _fallback_content_bundle(
-            hot_event=hot_event,
-            strategy_result=strategy_result,
-            node=node,
-            node_index=index,
-            target=target,
-            variants=variants,
-            selected_ids=selected_ids,
-        )
-        override_content = llm_overrides.get(node.user_id, {})
-        audience_profile = override_content.get("audience_profile") or fallback_content["audience_profile"]
-        interaction_focus = (
-            override_content.get("audience_interaction_strategy")
-            or fallback_content["audience_interaction_strategy"]
-        )
-        coordination_focus = (
-            override_content.get("cross_digital_human_strategy")
-            or fallback_content["cross_digital_human_strategy"]
-        )
-        topic_labels = _topic_labels(node, strategy_result)
-        role_bucket_ids = _role_bucket_ids(strategy_result.selected_nodes, node.user_id)
-        actions = _build_compact_action_plan(
-            node=node,
-            node_index=index,
-            platform=output_platform,
-            post_content=override_content.get("post_content") or fallback_content["post_content"],
-            topic_labels=topic_labels,
-            interaction_focus=interaction_focus,
-            coordination_focus=coordination_focus,
-            role_bucket_ids=role_bucket_ids,
-            post_refs=post_refs,
-            publish_action_ids=publish_action_ids,
-        )
-        coordination_action_ids = [
-            action["动作编号"]
-            for action in actions
-            if action.get("动作分组") == "digital_human_coordination"
-        ]
-
-        node_outputs[f"id{node.user_id}"] = {
-            "时间阶段": _stage_text(node),
-            "发帖频率": _frequency_text(node.frequency_per_day),
-            "发帖平台": platform,
-            "数字人人设": _persona_for_node(node=node, topic_labels=topic_labels),
-            "发帖内容": override_content.get("post_content") or fallback_content["post_content"],
-            "目标受众": {
-                "目标群体画像": audience_profile,
-                "目标群体标签": strategy_result.strategy.target_object,
-                "主题关键词": topic_labels,
-            },
-            "动作清单": actions,
-            "与其他数字人互动策略": {
-                "互动数字人id集合": [item for item in selected_ids if item != node.user_id],
-                "协同动作编号": coordination_action_ids,
-                "协同说明": coordination_focus,
-            },
-            "执行约束": {
-                "节点角色": node.selected_role,
-                "执行阶段": node.dispatch_stage,
-                "执行优先级": node.dispatch_priority,
-                "节点得分": round(node.final_score, 6),
-                "风险等级": node.risk_level,
-                "人工复核": node.manual_review_required,
-                "风险标签": node.risk_flags,
-            },
-        }
+    node_outputs, post_refs, _ = _build_node_outputs(
+        hot_event=hot_event,
+        strategy_result=strategy_result,
+        selected_nodes=selected_nodes,
+        target=target,
+        variants=variants,
+        llm_overrides=llm_overrides,
+        platform_for=lambda node: output_platform,
+    )
 
     five_dimension_strategy = _build_five_dimension_strategy(
         strategy_result=strategy_result,
@@ -886,6 +1120,121 @@ def build_eval_output(
     return payload, content_llm_meta
 
 
+def _build_node_outputs(
+    *,
+    hot_event: dict[str, Any],
+    strategy_result: StrategyResult,
+    selected_nodes: list[StrategyNodePlan],
+    target: str,
+    variants: list[str],
+    llm_overrides: dict[str, dict[str, str]],
+    platform_for: Callable[[StrategyNodePlan], str],
+    peer_nodes_for: Callable[[StrategyNodePlan], list[StrategyNodePlan]] | None = None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, str], dict[str, str]]:
+    """为每个选中节点生成正文与动作清单。
+
+    多人分发与跨平台分发共用这段组装逻辑，差异只由两个回调表达：
+
+    * ``platform_for``：节点执行落地的平台。多人分发是全局主平台，跨平台分发是
+      该数字人自己的平台。
+    * ``peer_nodes_for``：协同对象（``digital_human_coordination``）的候选范围。
+      多人分发是全部选中节点；跨平台分发只在同平台内寻找——各平台独立排期执行，
+      跨平台挂接动作既不成立，也会让动作指向另一个平台的帖子。
+
+    返回 ``(node_outputs, post_refs, publish_action_ids)``。
+    """
+
+    post_refs = {
+        node.user_id: f"P{index:03d}"
+        for index, node in enumerate(selected_nodes, start=1)
+    }
+    publish_action_ids = {
+        node.user_id: f"A{((index - 1) * 4) + 1:03d}"
+        for index, node in enumerate(selected_nodes, start=1)
+    }
+
+    node_outputs: dict[str, dict[str, Any]] = {}
+    for index, node in enumerate(selected_nodes, start=1):
+        peers = peer_nodes_for(node) if peer_nodes_for is not None else selected_nodes
+        peer_ids = [item.user_id for item in peers]
+        node_platform = platform_for(node)
+        fallback_content = _fallback_content_bundle(
+            hot_event=hot_event,
+            strategy_result=strategy_result,
+            node=node,
+            node_index=index,
+            target=target,
+            variants=variants,
+            selected_ids=peer_ids,
+        )
+        override_content = llm_overrides.get(node.user_id, {})
+        post_content = (
+            override_content.get("post_content") or fallback_content["post_content"]
+        )
+        audience_profile = (
+            override_content.get("audience_profile")
+            or fallback_content["audience_profile"]
+        )
+        interaction_focus = (
+            override_content.get("audience_interaction_strategy")
+            or fallback_content["audience_interaction_strategy"]
+        )
+        coordination_focus = (
+            override_content.get("cross_digital_human_strategy")
+            or fallback_content["cross_digital_human_strategy"]
+        )
+        topic_labels = _topic_labels(node, strategy_result)
+        role_bucket_ids = _role_bucket_ids(peers, node.user_id)
+        actions = _build_compact_action_plan(
+            node=node,
+            node_index=index,
+            platform=node_platform,
+            post_content=post_content,
+            topic_labels=topic_labels,
+            interaction_focus=interaction_focus,
+            coordination_focus=coordination_focus,
+            role_bucket_ids=role_bucket_ids,
+            post_refs=post_refs,
+            publish_action_ids=publish_action_ids,
+        )
+        coordination_action_ids = [
+            action["动作编号"]
+            for action in actions
+            if action.get("动作分组") == "digital_human_coordination"
+        ]
+
+        node_outputs[f"id{node.user_id}"] = {
+            "时间阶段": _stage_text(node),
+            "发帖频率": _frequency_text(node.frequency_per_day),
+            "发帖平台": node_platform,
+            "数字人人设": _persona_for_node(node=node, topic_labels=topic_labels),
+            "发帖内容": post_content,
+            "目标受众": {
+                "目标群体画像": audience_profile,
+                "目标群体标签": strategy_result.strategy.target_object,
+                "主题关键词": topic_labels,
+            },
+            "动作清单": actions,
+            "与其他数字人互动策略": {
+                "互动数字人id集合": [
+                    item for item in peer_ids if item != node.user_id
+                ],
+                "协同动作编号": coordination_action_ids,
+                "协同说明": coordination_focus,
+            },
+            "执行约束": {
+                "节点角色": node.selected_role,
+                "执行阶段": node.dispatch_stage,
+                "执行优先级": node.dispatch_priority,
+                "节点得分": round(node.final_score, 6),
+                "风险等级": node.risk_level,
+                "人工复核": node.manual_review_required,
+                "风险标签": node.risk_flags,
+            },
+        }
+    return node_outputs, post_refs, publish_action_ids
+
+
 def _build_five_dimension_strategy(
     *,
     strategy_result: StrategyResult,
@@ -895,6 +1244,8 @@ def _build_five_dimension_strategy(
     target: str,
     post_refs: dict[str, str],
     node_outputs: dict[str, dict[str, Any]],
+    platform_item_fields: dict[str, dict[str, Any]] | None = None,
+    platform_extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     target_objects = strategy_result.strategy.target_object or ["泛公众"]
     frequency_plan = strategy_result.strategy.frequency_plan
@@ -948,13 +1299,16 @@ def _build_five_dimension_strategy(
                 "频率上限": _frequency_text(frequency_plan.global_cap_per_day),
             }
         )
-        platform_items.append(
-            {
-                "数字人id": node.user_id,
-                # 每个数字人只归属唯一模拟平台，优先输出其自身的平台归属。
-                "分发平台": node.platform or platform,
-            }
-        )
+        platform_item: dict[str, Any] = {
+            "数字人id": node.user_id,
+            # 每个数字人只归属唯一模拟平台，优先输出其自身的平台归属。
+            "分发平台": node.platform or platform,
+        }
+        if platform_item_fields:
+            # 跨平台模式在这里补上"平台角色 / 安全等级 / 平台适配分"等平台专属依据；
+            # 多人分发不传该参数，因此不会凭空多出字段。
+            platform_item.update(platform_item_fields.get(node.user_id, {}))
+        platform_items.append(platform_item)
         content_items.append(
             {
                 "数字人id": node.user_id,
@@ -963,6 +1317,15 @@ def _build_five_dimension_strategy(
             }
         )
         actions.extend(selected_actions)
+
+    platform_dimension: dict[str, Any] = {
+        "平台模式": platform_mode,
+        "数字人平台分发": platform_items,
+    }
+    if platform_extra:
+        # 跨平台模式把「跨平台总览」与「各平台方案」挂在这里；多人分发不传该参数，
+        # 因此两个模式的「平台」维度只在跨平台时多出这两块，其余字段完全一致。
+        platform_dimension.update(platform_extra)
 
     return {
         "目标对象": {
@@ -977,10 +1340,7 @@ def _build_five_dimension_strategy(
         "频率": {
             "数字人频率": frequency_items,
         },
-        "平台": {
-            "平台模式": platform_mode,
-            "数字人平台分发": platform_items,
-        },
+        "平台": platform_dimension,
         "内容": {
             "数字人发帖内容": content_items,
             "动作清单": actions,
@@ -1953,6 +2313,7 @@ def _build_llm_node_texts(
     workspace_root: str | Path | None,
     use_llm: bool,
     llm_client: Any | None,
+    platform_for: Callable[[StrategyNodePlan], str] | None = None,
 ) -> tuple[dict[str, dict[str, str]], dict[str, Any]]:
     metadata: dict[str, Any] = {
         "requested": bool(use_llm),
@@ -2017,6 +2378,7 @@ def _build_llm_node_texts(
         eligible_nodes=eligible_nodes,
         platform=platform,
         target=target,
+        platform_for=platform_for,
     )
 
     try:
@@ -2110,19 +2472,29 @@ def _llm_prompt(
     eligible_nodes: list[StrategyNodePlan],
     platform: str,
     target: str,
+    platform_for: Callable[[StrategyNodePlan], str] | None = None,
 ) -> str:
     variants = _normalize_variants(hot_event.get("opinion_variants", []))
-    selected_ids = [node.user_id for node in strategy_result.selected_nodes]
     nodes_payload = []
     for node in eligible_nodes:
+        # 跨平台模式下每个节点属于不同平台，把同平台协作对象一并交给 LLM，
+        # 否则模型会以为"其它平台的人"也会来挂接当前平台的帖子。
+        node_platform = platform_for(node) if platform_for is not None else platform
+        other_ids = [
+            item.user_id
+            for item in strategy_result.selected_nodes
+            if item.user_id != node.user_id
+            and (platform_for(item) if platform_for is not None else platform)
+            == node_platform
+        ]
         nodes_payload.append(
             {
                 "user_id": node.user_id,
                 "role": node.selected_role,
                 "stage": _stage_text(node),
                 "frequency": _frequency_text(node.frequency_per_day),
-                "platform": platform,
-                "other_digital_human_ids": [item for item in selected_ids if item != node.user_id],
+                "platform": node_platform,
+                "other_digital_human_ids": other_ids,
                 "recommended_action": node.recommended_action,
                 "content_style_hint": node.suggested_content_style,
             }

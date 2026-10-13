@@ -328,8 +328,8 @@ def create_app() -> FastAPI:
 
     @app.get("/api/runs/{run_id}/results/{event_id}")
     def get_result_detail(run_id: str, event_id: str) -> dict[str, Any]:
-        output_path = _run_dir(run_id) / "output" / f"{event_id}_strategy_output.json"
-        if not output_path.exists():
+        output_path = _resolve_result_output_path(run_id, event_id)
+        if output_path is None:
             raise HTTPException(status_code=404, detail=f"Result not found: {event_id}")
         return _load_json(output_path)
 
@@ -349,8 +349,8 @@ def create_app() -> FastAPI:
 
     @app.get("/api/runs/{run_id}/files/{event_id}")
     def download_result(run_id: str, event_id: str) -> FileResponse:
-        output_path = _run_dir(run_id) / "output" / f"{event_id}_strategy_output.json"
-        if not output_path.exists():
+        output_path = _resolve_result_output_path(run_id, event_id)
+        if output_path is None:
             raise HTTPException(status_code=404, detail=f"Result not found: {event_id}")
         return FileResponse(output_path, filename=output_path.name, media_type="application/json")
 
@@ -637,46 +637,9 @@ def _result_summary(
         "json_output_path": str(output_path),
     }
 
-    if dispatch_mode == "cross_platform":
-        # 多平台模式无旧版五维调度策略，也不调旧版 LLM 帖子生成；
-        # 把每个平台的人数与选取 id 汇总到顶层，方便前端列表展示。
-        block = payload.get("多平台分发策略") or {}
-        platforms = block.get("platforms") if isinstance(block, dict) else []
-        selected_ids: list[str] = []
-        per_platform: list[dict[str, Any]] = []
-        if isinstance(platforms, list):
-            for item in platforms:
-                if not isinstance(item, dict):
-                    continue
-                nodes = item.get("selected_nodes") or []
-                ids = [
-                    str(node.get("user_id"))
-                    for node in nodes
-                    if isinstance(node, dict) and node.get("user_id") is not None
-                ]
-                for user_id in ids:
-                    if user_id not in selected_ids:
-                        selected_ids.append(user_id)
-                per_platform.append(
-                    {
-                        "platform_key": item.get("platform_key"),
-                        "requested_count": item.get("requested_count"),
-                        "selected_count": item.get("selected_count"),
-                        "shortfall_count": item.get("shortfall_count"),
-                        "safe_shortfall_count": item.get("safe_shortfall_count"),
-                        "selected_user_ids": ids,
-                    }
-                )
-        summary["selected_digital_human_ids"] = selected_ids
-        summary["per_platform"] = per_platform
-        summary["content_llm"] = {
-            "used": False,
-            "post_content_source": "platform_content_plan",
-            "note": "多平台模式不调用旧版 LLM 帖子生成，正文来自各平台 content_plan 模板。",
-        }
-        return summary
-
-    # single_target 与 multi_user 共用旧版五维调度策略结构。
+    # single_target / multi_user / cross_platform 现在共用同一套五维调度策略结构，
+    # 因此读取逻辑也共用一份；跨平台模式只是额外把逐平台的人数与选取 id 汇总出来，
+    # 供结果列表按平台展示。
     strategy = payload.get("五维调度策略", {})
     target_object = strategy.get("目标对象", {}) if isinstance(strategy, dict) else {}
     content = strategy.get("内容", {}) if isinstance(strategy, dict) else {}
@@ -687,6 +650,13 @@ def _result_summary(
     summary["content_llm"] = (
         content.get("内容生成诊断", {}) if isinstance(content, dict) else {}
     )
+
+    if dispatch_mode == "cross_platform":
+        summary["per_platform"] = _cross_platform_per_platform(
+            strategy if isinstance(strategy, dict) else {}
+        )
+        return summary
+
     if dispatch_mode == "single_target":
         diagnostic = payload.get("定向分发诊断")
         if isinstance(diagnostic, dict):
@@ -697,6 +667,43 @@ def _result_summary(
                 "warnings": diagnostic.get("warnings") or [],
             }
     return summary
+
+
+def _cross_platform_per_platform(strategy: dict[str, Any]) -> list[dict[str, Any]]:
+    """从五维调度策略的「平台」维度取出逐平台人数与选取 id。
+
+    跨平台模式与多人分发共用五维结构，各平台独立的选人结果集中在
+    ``五维调度策略.平台.各平台方案``；结果列表只需要其中的人数与 id，
+    因此在这里做一次窄化映射，而不是把整块平台方案透传给前端。
+    """
+
+    platform_dimension = strategy.get("平台")
+    schemes = (
+        platform_dimension.get("各平台方案")
+        if isinstance(platform_dimension, dict)
+        else None
+    )
+    if not isinstance(schemes, list):
+        return []
+
+    per_platform: list[dict[str, Any]] = []
+    for item in schemes:
+        if not isinstance(item, dict):
+            continue
+        ids = item.get("选取数字人id组") or []
+        per_platform.append(
+            {
+                "platform_key": item.get("平台"),
+                "requested_count": item.get("目标人数"),
+                "selected_count": item.get("选取人数"),
+                "shortfall_count": item.get("人数缺口"),
+                "safe_shortfall_count": item.get("合格缺口"),
+                "selected_user_ids": [
+                    str(user_id) for user_id in ids if user_id is not None
+                ],
+            }
+        )
+    return per_platform
 
 
 def _append_result(run_id: str, result: dict[str, Any]) -> None:
@@ -755,6 +762,51 @@ def _write_status_unlocked(run_id: str, status: dict[str, Any]) -> None:
 
 def _run_dir(run_id: str) -> Path:
     return WEB_RUNS_ROOT / _safe_run_id(run_id)
+
+
+def _resolve_result_output_path(run_id: str, event_id: str) -> Path | None:
+    """定位某个事件的结果 JSON 文件。
+
+    必须按 status.json 里记录的 ``json_output_path`` 优先解析，因为不同
+    dispatch_mode 的产物命名并不统一：
+
+    * multi_user / single_target → ``{event_id}_strategy_output.json``
+    * cross_platform            → ``{event_id}_multiplatform_{platform_tag}_strategy_output.json``
+
+    旧实现直接拼 ``{event_id}_strategy_output.json``，导致跨平台模式虽然在
+    output 目录里生成了正确文件，detail/download 接口却 404，前端显示"无结果"。
+    """
+
+    # 1) 优先用 status.json 中记录的真实产物路径。
+    try:
+        status = _read_status(run_id)
+    except HTTPException:
+        status = {}
+    for item in status.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("event_id")) != event_id:
+            continue
+        raw_path = item.get("json_output_path")
+        if not raw_path:
+            continue
+        candidate = Path(str(raw_path))
+        for path in (candidate, PROJECT_ROOT / candidate) if not candidate.is_absolute() else (candidate,):
+            if path.exists():
+                return path
+
+    # 2) 回退到旧命名（multi_user / single_target）。
+    output_dir = _run_dir(run_id) / "output"
+    legacy = output_dir / f"{event_id}_strategy_output.json"
+    if legacy.exists():
+        return legacy
+
+    # 3) 回退到 glob：兼容跨平台等多后缀命名，取最新一份。
+    safe_event_id = _safe_event_id(event_id)
+    matches = sorted(output_dir.glob(f"{safe_event_id}_*strategy_output.json"))
+    if matches:
+        return matches[-1]
+    return None
 
 
 def _safe_run_id(run_id: str) -> str:

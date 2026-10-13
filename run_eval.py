@@ -16,7 +16,7 @@ from influence_strategy.eval_hot_events import (
     EVAL_MODE_MULTI_PLATFORM,
     EVAL_MODE_MULTI_USER,
     EVAL_MODE_SINGLE_TARGET,
-    MULTIPLATFORM_STRATEGY_KEY,
+    FIVE_DIMENSION_STRATEGY_KEY,
     RUN_SUMMARY_FILENAME,
     load_hot_events,
     resolve_eval_run_dirs,
@@ -184,61 +184,89 @@ def _event_id_from_output_path(output_path: Path) -> str:
     return stem
 
 
-def _multiplatform_summary_from_payload(payload: dict) -> dict | None:
-    """提取多平台分发摘要；非多平台输出返回 None（不改变旧输出）。"""
+#: 五维调度策略里的中文安全等级 → 运行摘要对外沿用的英文 tier 键。
+_TIER_KEY_BY_LABEL: dict[str, str] = {
+    "合格": "safe",
+    "待人工复核": "review_required",
+    "未通过资格筛选": "not_eligible",
+}
 
-    block = payload.get(MULTIPLATFORM_STRATEGY_KEY)
-    if not isinstance(block, dict) or not block:
+
+def _tier_counts(value: object) -> dict:
+    """把五维里的中文安全等级计数还原成英文 tier 键。
+
+    业务 JSON 已统一使用中文标签，但运行摘要（``run_summary.json``）的对外字段名
+    保持不变，避免下游脚本因一次结构对齐而全部失效。
+    """
+
+    if not isinstance(value, dict):
+        return {english: 0 for english in _TIER_KEY_BY_LABEL.values()}
+    return {
+        english: int(value.get(chinese, 0) or 0)
+        for chinese, english in _TIER_KEY_BY_LABEL.items()
+    }
+
+
+def _five_dimension_platform_dimension(payload: dict) -> dict | None:
+    """取出五维调度策略的「平台」维度；只有跨平台模式才有「各平台方案」。"""
+
+    strategy = payload.get(FIVE_DIMENSION_STRATEGY_KEY)
+    if not isinstance(strategy, dict):
         return None
-    platforms = block.get("platforms")
-    if not isinstance(platforms, list):
-        platforms = []
-    def _tier_counts(value: object) -> dict:
-        if not isinstance(value, dict):
-            return {}
-        return {
-            key: value.get(key, 0)
-            for key in ("safe", "review_required", "not_eligible")
-        }
+    platform_dimension = strategy.get("平台")
+    if not isinstance(platform_dimension, dict):
+        return None
+    if not isinstance(platform_dimension.get("各平台方案"), list):
+        return None
+    return platform_dimension
+
+
+def _multiplatform_summary_from_payload(payload: dict) -> dict | None:
+    """提取跨平台分发摘要；非跨平台输出返回 None（不改变旧输出）。
+
+    跨平台输出与多人分发共用五维调度策略结构，逐平台的选人结果集中在
+    ``五维调度策略.平台.各平台方案``；这里只把运行摘要需要的计数字段窄化出来。
+    """
+
+    platform_dimension = _five_dimension_platform_dimension(payload)
+    if platform_dimension is None:
+        return None
+
+    schemes = platform_dimension["各平台方案"]
+    overview = platform_dimension.get("跨平台总览")
+    overview = overview if isinstance(overview, dict) else {}
 
     return {
-        "dispatch_mode": block.get("dispatch_mode"),
+        "dispatch_mode": overview.get("调度模式"),
         "platforms": [
             {
-                "platform_key": item.get("platform_key"),
-                "requested_count": item.get("requested_count"),
-                "selected_count": item.get("selected_count"),
-                "shortfall_count": item.get("shortfall_count"),
+                "platform_key": item.get("平台"),
+                "requested_count": item.get("目标人数"),
+                "selected_count": item.get("选取人数"),
+                "shortfall_count": item.get("人数缺口"),
                 # 人数够不够 ≠ 合格的人够不够，两个缺口都要暴露给操作者。
-                "safe_shortfall_count": item.get("safe_shortfall_count"),
-                "selected_safety_tiers": _tier_counts(
-                    item.get("selected_safety_tiers")
-                ),
-                "selected_user_ids": [
-                    node.get("user_id") for node in item.get("selected_nodes", [])
-                ],
+                "safe_shortfall_count": item.get("合格缺口"),
+                "selected_safety_tiers": _tier_counts(item.get("安全等级分布")),
+                "selected_user_ids": list(item.get("选取数字人id组") or []),
             }
-            for item in platforms
+            for item in schemes
             if isinstance(item, dict)
         ],
-        "total_selected_safety_tiers": _tier_counts(
-            block.get("total_selected_safety_tiers")
-        ),
-        "total_safe_shortfall_count": block.get("total_safe_shortfall_count"),
-        "unique_user_count": block.get("unique_user_count"),
-        "overlapping_user_ids": block.get("overlapping_user_ids"),
+        "total_selected_safety_tiers": _tier_counts(overview.get("安全等级分布")),
+        "total_safe_shortfall_count": overview.get("合格缺口合计"),
+        "unique_user_count": overview.get("去重数字人数"),
+        "overlapping_user_ids": overview.get("跨平台重复数字人"),
     }
 
 
 def _selected_ids_from_payload(payload: dict) -> list[str]:
     """读取本次运行选取的数字人 id（保持首次出现顺序并去重）。
 
-    旧模式从 ``五维调度策略.目标对象.选取数字人id组`` 读取；多平台输出没有该
-    字段，改从 ``多平台分发策略.platforms[].selected_nodes[].user_id`` 汇总，
-    避免运行摘要里的选人信息因为模式不同而丢失。
+    三种模式现在共用五维调度策略结构，选人信息统一取自
+    ``五维调度策略.目标对象.选取数字人id组``，不再需要按模式分支汇总。
     """
 
-    strategy = payload.get("五维调度策略", {})
+    strategy = payload.get(FIVE_DIMENSION_STRATEGY_KEY, {})
     target_object = strategy.get("目标对象", {}) if isinstance(strategy, dict) else {}
     selected_ids = target_object.get("选取数字人id组", [])
     if selected_ids:
@@ -246,57 +274,21 @@ def _selected_ids_from_payload(payload: dict) -> list[str]:
     legacy_ids = payload.get("选取数字人id组", [])
     if legacy_ids:
         return legacy_ids
-
-    block = payload.get(MULTIPLATFORM_STRATEGY_KEY)
-    if not isinstance(block, dict):
-        return []
-    platforms = block.get("platforms")
-    if not isinstance(platforms, list):
-        return []
-
-    ordered: list[str] = []
-    for platform in platforms:
-        if not isinstance(platform, dict):
-            continue
-        nodes = platform.get("selected_nodes")
-        if not isinstance(nodes, list):
-            continue
-        for node in nodes:
-            if not isinstance(node, dict):
-                continue
-            user_id = node.get("user_id")
-            if user_id is None:
-                continue
-            user_id_text = str(user_id)
-            if user_id_text not in ordered:
-                ordered.append(user_id_text)
-    return ordered
+    return []
 
 
 def _content_llm_status_from_payload(payload: dict) -> dict:
     """读取内容生成诊断：帖子正文是 LLM 生成还是规则兜底，以及兜底原因。
 
-    多平台模式不生成旧版单平台帖子，正文来自各平台 ``content_plan`` 模板，
-    因此没有旧版 LLM 内容生成诊断；这里显式说明正文来源，避免空值被误读成
-    「LLM 生成失败」。
+    三种模式共用五维调度策略结构，诊断统一取自
+    ``五维调度策略.内容.内容生成诊断``。
     """
 
-    strategy = payload.get("五维调度策略", {})
+    strategy = payload.get(FIVE_DIMENSION_STRATEGY_KEY, {})
     content = strategy.get("内容", {}) if isinstance(strategy, dict) else {}
     diagnostic = content.get("内容生成诊断", {})
     if isinstance(diagnostic, dict) and diagnostic:
         return diagnostic
-
-    block = payload.get(MULTIPLATFORM_STRATEGY_KEY)
-    if isinstance(block, dict) and block:
-        return {
-            "used": False,
-            "post_content_source": "platform_content_plan",
-            "note": (
-                "多平台模式不调用旧版 LLM 帖子生成，"
-                "各平台正文来自 content_plan 模板与段落指引。"
-            ),
-        }
     return {}
 
 

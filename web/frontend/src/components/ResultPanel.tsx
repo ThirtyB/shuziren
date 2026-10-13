@@ -60,12 +60,15 @@ export function ResultPanel({
             <SingleTargetDetail payload={payload} result={result} />
           )}
 
-          {result.dispatch_mode === "multi_user" && (
-            <LegacyFiveDimension payload={payload} />
+          {result.dispatch_mode === "cross_platform" && (
+            <CrossPlatformOverview payload={payload} />
           )}
 
-          {result.dispatch_mode === "cross_platform" && (
-            <CrossPlatformDetail payload={payload} result={result} />
+          {/* 多人分发与跨平台分发共用同一套五维调度策略结构，
+              跨平台只是多出「平台」维度下的各平台方案。 */}
+          {(result.dispatch_mode === "multi_user" ||
+            result.dispatch_mode === "cross_platform") && (
+            <FiveDimension payload={payload} />
           )}
 
           <TraceSection trace={trace} />
@@ -118,12 +121,18 @@ function SingleTargetDetail({
           </ul>
         )}
       </section>
-      <LegacyFiveDimension payload={payload} />
+      <FiveDimension payload={payload} />
     </>
   );
 }
 
-function LegacyFiveDimension({ payload }: { payload: Record<string, unknown> }) {
+/**
+ * 五维调度策略渲染：多人分发与跨平台分发**共用**同一套维度结构。
+ *
+ * 跨平台模式额外在「平台」维度下带 ``各平台方案``，检测到就逐平台追加渲染，
+ * 因此两种模式只有这一块差异，不存在第二条读取路径。
+ */
+function FiveDimension({ payload }: { payload: Record<string, unknown> }) {
   const strategy = payload["五维调度策略"] as Record<string, unknown> | undefined;
   const target = strategy?.["目标对象"] as Record<string, unknown> | undefined;
   const time = strategy?.["时间"] as Record<string, unknown> | undefined;
@@ -131,6 +140,8 @@ function LegacyFiveDimension({ payload }: { payload: Record<string, unknown> }) 
   const platform = strategy?.["平台"] as Record<string, unknown> | undefined;
   const content = strategy?.["内容"] as Record<string, unknown> | undefined;
   const selectedIds = (target?.["选取数字人id组"] as string[] | undefined) ?? [];
+  const platformSchemes =
+    (platform?.["各平台方案"] as Array<Record<string, unknown>> | undefined) ?? [];
 
   return (
     <>
@@ -173,6 +184,13 @@ function LegacyFiveDimension({ payload }: { payload: Record<string, unknown> }) 
             (platform?.["数字人平台分发"] as Array<Record<string, unknown>> | undefined) ?? []
           }
         />
+        {platformSchemes.map((scheme, index) => (
+          <PlatformSchemeCard
+            key={`${String(scheme["平台"] ?? index)}-${index}`}
+            scheme={scheme}
+            index={index}
+          />
+        ))}
       </section>
 
       <section className="result-section">
@@ -196,94 +214,207 @@ function LegacyFiveDimension({ payload }: { payload: Record<string, unknown> }) 
   );
 }
 
-function CrossPlatformDetail({
-  payload,
-  result,
-}: {
-  payload: Record<string, unknown>;
-  result: RunResult;
-}) {
-  const block = (payload["多平台分发策略"] as Record<string, unknown> | undefined) ?? {};
-  const platforms = (block.platforms as Array<Record<string, unknown>> | undefined) ?? [];
-  const totals = (block["total_selected_safety_tiers"] as
-    | Record<string, unknown>
-    | undefined) ?? {};
-  const summary = result.per_platform ?? [];
-  return (
-    <>
-      <section className="result-section highlight">
-        <h3>跨平台分发总览</h3>
-        <div className="summary-band">
-          <div>
-            <span>分发的平台数</span>
-            <strong>{platforms.length}</strong>
-          </div>
-          <div>
-            <span>总选用数字人</span>
-            <strong>{result.selected_digital_human_ids.length}</strong>
-          </div>
-          <div>
-            <span>安全等级分布</span>
-            <strong>
-              safe {Number(totals.safe ?? 0)} / review {Number(totals.review_required ?? 0)} / no {Number(totals.not_eligible ?? 0)}
-            </strong>
-          </div>
-        </div>
-      </section>
+/**
+ * 跨平台分发总览：人数 / 缺口 / 安全等级 / 重复数字人 / 跨平台提示。
+ *
+ * 数据来自 ``五维调度策略.平台.跨平台总览``——与多人分发共用同一套输出结构，
+ * 不再读取第二份顶层块。
+ */
+function CrossPlatformOverview({ payload }: { payload: Record<string, unknown> }) {
+  const strategy = payload["五维调度策略"] as Record<string, unknown> | undefined;
+  const platform = strategy?.["平台"] as Record<string, unknown> | undefined;
+  const overview =
+    (platform?.["跨平台总览"] as Record<string, unknown> | undefined) ?? {};
+  const tiers =
+    (overview["安全等级分布"] as Record<string, unknown> | undefined) ?? {};
+  const overlaps = (overview["跨平台重复数字人"] as string[] | undefined) ?? [];
+  const warnings = (overview["跨平台提示"] as string[] | undefined) ?? [];
+  const draftNote = String(overview["内容草案说明"] ?? "");
+  const scopeNote = String(overview["结果范围说明"] ?? "");
 
-      {(result.per_platform ?? []).map((item, index) => {
-        const platformBlock = platforms[index] ?? {};
-        const contentPlan = (platformBlock["content_plan"] as
-          | Record<string, unknown>
-          | undefined) ?? {};
-        const nodes = (item.selected_user_ids ?? []) as string[];
-        return (
-          <section className="result-section" key={index}>
-            <h3>
-              平台 {platformLabel(item.platform_key)} · 目标 {Number(item.requested_count ?? 0)} 人
-            </h3>
-            <div className="summary-band">
-              <div>
-                <span>实际选用</span>
-                <strong>{Number(item.selected_count ?? 0)}</strong>
-              </div>
-              <div>
-                <span>人数缺口</span>
-                <strong>{Number(item.shortfall_count ?? 0)}</strong>
-              </div>
-              <div>
-                <span>安全缺口</span>
-                <strong>{Number(item.safe_shortfall_count ?? 0)}</strong>
-              </div>
-            </div>
+  return (
+    <section className="result-section highlight">
+      <h3>跨平台分发总览</h3>
+      <div className="summary-band">
+        <div>
+          <span>分发的平台数</span>
+          <strong>{Number(overview["平台数"] ?? 0)}</strong>
+        </div>
+        <div>
+          <span>目标人数合计</span>
+          <strong>{Number(overview["目标人数合计"] ?? 0)}</strong>
+        </div>
+        <div>
+          <span>选取人数合计</span>
+          <strong>{Number(overview["选取人数合计"] ?? 0)}</strong>
+        </div>
+        <div>
+          <span>去重后人数</span>
+          <strong>{Number(overview["去重数字人数"] ?? 0)}</strong>
+        </div>
+        <div>
+          <span>合格缺口合计</span>
+          <strong>{Number(overview["合格缺口合计"] ?? 0)}</strong>
+        </div>
+        <div>
+          <span>安全等级分布</span>
+          <strong>
+            合格 {Number(tiers["合格"] ?? 0)} / 复核 {Number(tiers["待人工复核"] ?? 0)} /
+            不合格 {Number(tiers["未通过资格筛选"] ?? 0)}
+          </strong>
+        </div>
+      </div>
+      {overlaps.length > 0 && (
+        <>
+          <p>以下数字人同时出现在多个平台的选取结果里：</p>
+          <div className="id-row">
+            {overlaps.map((id) => (
+              <span key={id}>{id}</span>
+            ))}
+          </div>
+        </>
+      )}
+      {warnings.length > 0 && (
+        <ul className="warning-list">
+          {warnings.map((item, index) => (
+            <li key={index}>{item}</li>
+          ))}
+        </ul>
+      )}
+      {draftNote && <p>{draftNote}</p>}
+      {scopeNote && <p>{scopeNote}</p>}
+    </section>
+  );
+}
+
+/**
+ * 单个平台的分发方案：人数概览 + 选人明细 + 内容计划 + 时间计划 + 平台提示。
+ *
+ * 数据来自 ``五维调度策略.平台.各平台方案[i]``：与多人分发共用同一套五维输出，
+ * 跨平台只是多出这一块平台专属明细，字段名与后端一一对应。
+ */
+function PlatformSchemeCard({
+  scheme,
+  index,
+}: {
+  scheme: Record<string, unknown>;
+  index: number;
+}) {
+  const platformKey = String(scheme["平台"] ?? index);
+  const selectedIds = (scheme["选取数字人id组"] as string[] | undefined) ?? [];
+  const tiers = (scheme["安全等级分布"] as Record<string, unknown> | undefined) ?? {};
+
+  const roleRows =
+    (scheme["数字人平台角色"] as Array<Record<string, unknown>> | undefined) ?? [];
+  const contentModes = (scheme["内容形态"] as string[] | undefined) ?? [];
+  const guidanceRows =
+    (scheme["写作指引"] as Array<Record<string, unknown>> | undefined) ?? [];
+  const guardrails = (scheme["内容护栏"] as string[] | undefined) ?? [];
+  const stageRows =
+    (scheme["时间阶段"] as Array<Record<string, unknown>> | undefined) ?? [];
+  const cadenceNotes = (scheme["节奏建议"] as string[] | undefined) ?? [];
+  const stageNote = String(scheme["阶段说明"] ?? "");
+  const warnings = (scheme["平台提示"] as string[] | undefined) ?? [];
+  const fitLimitations = (scheme["适配限制"] as string[] | undefined) ?? [];
+  const policyDisclaimer = String(scheme["免责声明"] ?? "");
+
+  return (
+    <div className="sub-section">
+      <h3>
+        平台方案 · {platformLabel(platformKey)} · 目标{" "}
+        {Number(scheme["目标人数"] ?? 0)} 人
+      </h3>
+      <div className="summary-band">
+        <div>
+          <span>实际选用</span>
+          <strong>{Number(scheme["选取人数"] ?? 0)}</strong>
+        </div>
+        <div>
+          <span>人数缺口</span>
+          <strong>{Number(scheme["人数缺口"] ?? 0)}</strong>
+        </div>
+        <div>
+          <span>合格缺口</span>
+          <strong>{Number(scheme["合格缺口"] ?? 0)}</strong>
+        </div>
+        <div>
+          <span>安全等级分布</span>
+          <strong>
+            合格 {Number(tiers["合格"] ?? 0)} / 复核{" "}
+            {Number(tiers["待人工复核"] ?? 0)} / 不合格{" "}
+            {Number(tiers["未通过资格筛选"] ?? 0)}
+          </strong>
+        </div>
+      </div>
+
+      <div className="stack">
+        <div className="sub-section">
+          <h3>选取节点</h3>
+          <div className="id-row">
+            {selectedIds.map((id) => (
+              <span key={id}>{id}</span>
+            ))}
+          </div>
+          <DataTable items={roleRows} />
+        </div>
+
+        <div className="sub-section">
+          <h3>内容计划</h3>
+          {contentModes.length > 0 && (
             <div className="id-row">
-              {nodes.map((id) => (
-                <span key={id}>{id}</span>
+              {contentModes.map((mode) => (
+                <span key={mode}>{mode}</span>
               ))}
             </div>
-            <DataTable
-              items={
-                (contentPlan["段落指引"] as Array<Record<string, unknown>> | undefined) ??
-                (contentPlan["paragraphs"] as Array<Record<string, unknown>> | undefined) ??
-                []
-              }
-            />
-            <DataTable
-              items={
-                (contentPlan["动作清单"] as Array<Record<string, unknown>> | undefined) ?? []
-              }
-            />
-          </section>
-        );
-      })}
+          )}
+          <DataTable items={guidanceRows} />
+          {guardrails.length > 0 && (
+            <>
+              <h3>内容护栏</h3>
+              <ul className="warning-list">
+                {guardrails.map((item, guardIndex) => (
+                  <li key={guardIndex}>{item}</li>
+                ))}
+              </ul>
+            </>
+          )}
+        </div>
 
-      {summary.length === 0 && (
-        <section className="result-section">
-          <h3>平台</h3>
-          <div className="empty-table">未生成 per_platform 摘要</div>
-        </section>
-      )}
-    </>
+        <div className="sub-section">
+          <h3>时间计划</h3>
+          <DataTable items={stageRows} />
+          {cadenceNotes.length > 0 && (
+            <ul className="warning-list">
+              {cadenceNotes.map((item, noteIndex) => (
+                <li key={noteIndex}>{item}</li>
+              ))}
+            </ul>
+          )}
+          {stageNote && <p>{stageNote}</p>}
+        </div>
+
+        {(warnings.length > 0 || fitLimitations.length > 0 || policyDisclaimer) && (
+          <div className="sub-section">
+            <h3>风险与适配说明</h3>
+            {warnings.length > 0 && (
+              <ul className="warning-list">
+                {warnings.map((item, warningIndex) => (
+                  <li key={warningIndex}>{item}</li>
+                ))}
+              </ul>
+            )}
+            {fitLimitations.length > 0 && (
+              <ul className="warning-list">
+                {fitLimitations.map((item, limitIndex) => (
+                  <li key={limitIndex}>{item}</li>
+                ))}
+              </ul>
+            )}
+            {policyDisclaimer && <p>{policyDisclaimer}</p>}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 

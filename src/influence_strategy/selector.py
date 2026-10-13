@@ -11,6 +11,44 @@ from .models import NodeScore, ScoreResult, SelectedNode, SelectionResult, Selec
 from .platform_profiles import normalize_platform_key
 from .prompts import build_selector_system_prompt, build_selector_user_prompt
 
+# --------------------------------------------------------------------------- #
+# role_hint ↔ selected_role / dispatch_stage
+# --------------------------------------------------------------------------- #
+# ``FeatureBuilder`` 为每个数字人推断 ``role_hint``，``Selector`` 把它翻译成
+# 策略层角色 ``selected_role`` 与执行阶段 ``dispatch_stage``。
+#
+# ``PlatformDispatcher`` 复用**同一套** role_hint 词汇表（见
+# ``PlatformNodeAssignment.source_role_hint``），因此跨平台模式的选人结果只要
+# 查这几张表就能回到五维调度策略的角色/阶段口径，不需要在调用方另立一套映射。
+# 把映射提到模块级，就是为了让"多人分发选的人"和"跨平台选的人"用同一个来源，
+# 避免两处各写一份而慢慢漂移。
+ROLE_HINT_TO_SELECTED_ROLE: dict[str, str] = {
+    "core_broadcast": "core_publish_node",
+    "interaction_response": "interaction_response_node",
+    "amplification": "amplification_node",
+    "general_support": "support_node",
+}
+
+#: ``selected_role`` → ``role_hint``（重平衡角色后用于回填 ``dispatch_stage``）。
+SELECTED_ROLE_TO_ROLE_HINT: dict[str, str] = {
+    "core_publish_node": "core_broadcast",
+    "interaction_response_node": "interaction_response",
+    "amplification_node": "amplification",
+    "support_node": "general_support",
+}
+
+ROLE_HINT_TO_DISPATCH_STAGE: dict[str, str] = {
+    "core_broadcast": "stage_1_launch",
+    "interaction_response": "stage_2_engage",
+    "amplification": "stage_3_amplify",
+    "general_support": "stage_2_support",
+}
+
+#: 未识别的 role_hint 兜底（与历史实现保持一致，不引入新的行为）。
+DEFAULT_SELECTED_ROLE = "support_node"
+DEFAULT_ROLE_HINT = "general_support"
+DEFAULT_DISPATCH_STAGE = "stage_2_support"
+
 
 class Selector:
     def select(
@@ -351,13 +389,7 @@ class Selector:
         )
 
     def _selected_role(self, role_hint: str) -> str:
-        mapping = {
-            "core_broadcast": "core_publish_node",
-            "interaction_response": "interaction_response_node",
-            "amplification": "amplification_node",
-            "general_support": "support_node",
-        }
-        return mapping.get(role_hint, "support_node")
+        return ROLE_HINT_TO_SELECTED_ROLE.get(role_hint, DEFAULT_SELECTED_ROLE)
 
     def _rebalance_selected_roles(self, selected_nodes: list[SelectedNode]) -> list[SelectedNode]:
         if len(selected_nodes) <= 1:
@@ -403,22 +435,10 @@ class Selector:
         return rebalanced
 
     def _role_hint_for_selected_role(self, selected_role: str) -> str:
-        mapping = {
-            "core_publish_node": "core_broadcast",
-            "interaction_response_node": "interaction_response",
-            "amplification_node": "amplification",
-            "support_node": "general_support",
-        }
-        return mapping.get(selected_role, "general_support")
+        return SELECTED_ROLE_TO_ROLE_HINT.get(selected_role, DEFAULT_ROLE_HINT)
 
     def _dispatch_stage(self, role_hint: str) -> str:
-        mapping = {
-            "core_broadcast": "stage_1_launch",
-            "interaction_response": "stage_2_engage",
-            "amplification": "stage_3_amplify",
-            "general_support": "stage_2_support",
-        }
-        return mapping.get(role_hint, "stage_2_support")
+        return ROLE_HINT_TO_DISPATCH_STAGE.get(role_hint, DEFAULT_DISPATCH_STAGE)
 
     def _dispatch_priority(self, priority_tier: str) -> str:
         mapping = {

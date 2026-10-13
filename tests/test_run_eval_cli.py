@@ -14,18 +14,22 @@ from influence_strategy.eval_hot_events import MULTIPLATFORM_OUTPUT_FORMAT_VERSI
 
 PROJECT_ROOT = Path(run_eval.__file__).resolve().parent
 
-#: 多平台最终业务 JSON 中绝不允许出现的旧版单平台业务字段/标识。
-LEGACY_STRATEGY_MARKERS = (
-    "五维调度策略",
-    "数字人发帖内容",
-    "动作清单",
+#: 跨平台最终业务 JSON 中绝不允许出现的旧版**单平台专属**标识。
+#
+# 跨平台分发现在与多人分发共用同一套五维调度策略字段（目标对象 / 时间 / 频率 /
+# 平台 / 内容，含"数字人发帖内容"与"动作清单"），因此这些结构名已不再是"旧版
+# 专属"标记。真正必须隔离的是"微博单平台"这类旧平台口径：跨平台输出只应出现被
+# 显式调度过的模拟平台。
+LEGACY_PLATFORM_MARKERS = (
     "weibo_only",
     "weibo_simulated",
 )
 
 
-def _assert_no_legacy_strategy_payload(testcase: unittest.TestCase, payload: object) -> None:
-    """递归扫描多平台 JSON，确认其中不含任何旧版单平台业务字段或标识。"""
+def _assert_no_legacy_platform_markers(
+    testcase: unittest.TestCase, payload: object
+) -> None:
+    """递归扫描跨平台 JSON，确认其中不含旧版单平台专属的平台标识。"""
 
     found: list[str] = []
 
@@ -33,19 +37,19 @@ def _assert_no_legacy_strategy_payload(testcase: unittest.TestCase, payload: obj
         if isinstance(node, dict):
             for key, value in node.items():
                 key_text = str(key)
-                if key_text in LEGACY_STRATEGY_MARKERS:
+                if key_text in LEGACY_PLATFORM_MARKERS:
                     found.append(f"{path}.{key_text}")
                 _walk(value, f"{path}.{key_text}")
         elif isinstance(node, list):
             for index, item in enumerate(node):
                 _walk(item, f"{path}[{index}]")
         elif isinstance(node, str):
-            for marker in LEGACY_STRATEGY_MARKERS:
+            for marker in LEGACY_PLATFORM_MARKERS:
                 if marker in node:
                     found.append(f"{path} 值包含 {marker!r}")
 
     _walk(payload, "$")
-    testcase.assertEqual(found, [], f"多平台输出混入旧版单平台业务内容：{found}")
+    testcase.assertEqual(found, [], f"跨平台输出混入旧版单平台标识：{found}")
 
 
 def _write_minimal_workspace(root: Path, *, node_count: int = 4) -> None:
@@ -552,22 +556,38 @@ class MultiPlatformCliTest(unittest.TestCase):
     def test_console_summary_reports_multi_platform_counts(self) -> None:
         fake_payload = {
             "事件名称": "fake event",
-            "输出格式版本": "action_schema_v5_five_dimensions_minimal",
-            "五维调度策略": {"目标对象": {"选取数字人id组": ["1"]}},
-            "多平台分发策略": {
-                "dispatch_mode": "cross_platform",
-                "event_id": "hot_event_003",
-                "platforms": [
-                    {
-                        "platform_key": "facebook",
-                        "requested_count": 3,
-                        "selected_count": 2,
-                        "shortfall_count": 1,
-                        "selected_nodes": [{"user_id": "1"}, {"user_id": "2"}],
-                    }
-                ],
-                "unique_user_count": 2,
-                "overlapping_user_ids": ["1"],
+            "输出格式版本": MULTIPLATFORM_OUTPUT_FORMAT_VERSION,
+            "五维调度策略": {
+                "目标对象": {"选取数字人id组": ["1"]},
+                "平台": {
+                    "平台模式": "cross_platform",
+                    "跨平台总览": {
+                        "调度模式": "cross_platform",
+                        "去重数字人数": 2,
+                        "合格缺口合计": 1,
+                        "安全等级分布": {
+                            "合格": 2,
+                            "待人工复核": 0,
+                            "未通过资格筛选": 0,
+                        },
+                        "跨平台重复数字人": ["1"],
+                    },
+                    "各平台方案": [
+                        {
+                            "平台": "facebook",
+                            "目标人数": 3,
+                            "选取人数": 2,
+                            "人数缺口": 1,
+                            "合格缺口": 1,
+                            "安全等级分布": {
+                                "合格": 2,
+                                "待人工复核": 0,
+                                "未通过资格筛选": 0,
+                            },
+                            "选取数字人id组": ["1", "2"],
+                        }
+                    ],
+                },
             },
         }
 
@@ -763,8 +783,8 @@ class MultiPlatformSmokeTest(unittest.TestCase):
             mp_two_payload = self._read_json(mp_two_path)
             self.assertEqual(
                 [
-                    platform["platform_key"]
-                    for platform in mp_two_payload["多平台分发策略"]["platforms"]
+                    platform["平台"]
+                    for platform in mp_two_payload["五维调度策略"]["平台"]["各平台方案"]
                 ],
                 ["facebook", "twitter"],
             )
@@ -788,147 +808,151 @@ class MultiPlatformSmokeTest(unittest.TestCase):
             self.assertIn("动作清单", legacy_payload["五维调度策略"]["内容"])
 
             payload = json.loads(mp_path.read_text(encoding="utf-8"))
-            # 多平台输出由 build_multiplatform_output 独立构造：
-            # 只有事件信息、多平台版本标识与跨平台调度结果，不含旧版五维调度策略。
+            # 跨平台与多人分发共用同一套五维调度策略契约：五个维度字段名完全一致，
+            # 平台差异集中在「平台」维度下的各平台方案里。
             self.assertEqual(
                 payload["输出格式版本"], MULTIPLATFORM_OUTPUT_FORMAT_VERSION
             )
             self.assertEqual(
                 set(payload.keys()),
-                {"事件名称", "多平台分发策略", "输出格式版本"},
+                {"事件名称", "五维调度策略", "输出格式版本"},
             )
-            self.assertNotIn("五维调度策略", payload)
-            _assert_no_legacy_strategy_payload(self, payload)
+            _assert_no_legacy_platform_markers(self, payload)
 
-            block = payload["多平台分发策略"]
-            self.assertEqual(block["dispatch_mode"], "cross_platform")
-            self.assertEqual(block["event_id"], "hot_event_003")
+            strategy = payload["五维调度策略"]
+            for dimension in ("目标对象", "时间", "频率", "平台", "内容"):
+                self.assertIn(dimension, strategy)
+            # 节点级内容与动作清单必须与多人分发一样真实存在
+            self.assertTrue(strategy["目标对象"]["选取数字人id组"])
+            self.assertTrue(strategy["内容"]["数字人发帖内容"])
+            self.assertTrue(strategy["内容"]["动作清单"])
+
+            platform_dimension = strategy["平台"]
+            block = platform_dimension["跨平台总览"]
+            self.assertEqual(block["调度模式"], "cross_platform")
             self.assertIn("尚未在任何真实平台发布", block["内容草案说明"])
             self.assertIn("旧版单平台模拟分发", block["结果范围说明"])
-            self.assertTrue(block["warnings"])
-            self.assertTrue(block["policy_disclaimer"])
-            self.assertTrue(block["fit_limitations"])
-            self.assertGreaterEqual(block["unique_user_count"], 1)
+            self.assertTrue(block["跨平台提示"])
+            self.assertGreaterEqual(block["去重数字人数"], 1)
 
-            platforms = block["platforms"]
+            platforms = platform_dimension["各平台方案"]
             self.assertEqual(
-                [platform["platform_key"] for platform in platforms],
+                [platform["平台"] for platform in platforms],
                 ["facebook", "twitter", "instagram"],
             )
             self.assertEqual(
-                [platform["requested_count"] for platform in platforms], [3, 5, 2]
+                [platform["目标人数"] for platform in platforms], [3, 5, 2]
             )
             # 总人数统计不因输出重构而丢失
             self.assertEqual(
-                block["total_requested_count"],
-                sum(platform["requested_count"] for platform in platforms),
+                block["目标人数合计"],
+                sum(platform["目标人数"] for platform in platforms),
             )
             self.assertEqual(
-                block["total_selected_count"],
-                sum(platform["selected_count"] for platform in platforms),
+                block["选取人数合计"],
+                sum(platform["选取人数"] for platform in platforms),
             )
-            tier_totals = block["total_selected_safety_tiers"]
+            tier_totals = block["安全等级分布"]
             self.assertEqual(
-                sum(tier_totals.values()), block["total_selected_count"]
+                sum(tier_totals.values()), block["选取人数合计"]
             )
 
             for platform in platforms:
                 self.assertEqual(
-                    platform["shortfall_count"],
-                    max(0, platform["requested_count"] - platform["selected_count"]),
-                    platform["platform_key"],
+                    platform["人数缺口"],
+                    max(0, platform["目标人数"] - platform["选取人数"]),
+                    platform["平台"],
                 )
                 self.assertLessEqual(
-                    platform["selected_count"], platform["requested_count"]
+                    platform["选取人数"], platform["目标人数"]
                 )
-                self.assertTrue(platform["warnings"])
-                self.assertTrue(platform["platform_roles"])
-                self.assertTrue(platform["content_plan"]["sections"])
-                self.assertTrue(platform["content_plan"]["content_modes"])
-                self.assertTrue(platform["content_plan"]["guardrails"])
+                self.assertTrue(platform["平台提示"])
+                self.assertTrue(platform["平台角色配置"])
+                self.assertTrue(platform["写作指引"])
+                self.assertTrue(platform["内容形态"])
+                self.assertTrue(platform["内容护栏"])
+                self.assertTrue(platform["免责声明"])
+                self.assertTrue(platform["适配限制"])
 
                 # 真实数据上的时间计划必须落在活动窗口内
-                time_plan = platform["time_plan"]
-                self.assertTrue(time_plan["stages"])
+                stages = platform["时间阶段"]
+                self.assertTrue(stages)
                 self.assertEqual(
-                    time_plan["campaign_window_hours"],
-                    block["campaign_window_hours"],
-                    platform["platform_key"],
+                    platform["活动窗口小时"],
+                    block["活动窗口小时"],
+                    platform["平台"],
                 )
-                self.assertTrue(time_plan["stage_schedule_note"])
-                for stage in time_plan["stages"]:
-                    ctx = f"{platform['platform_key']} {stage['stage_key']}"
-                    self.assertGreaterEqual(stage["start_hour"], 0, ctx)
+                self.assertTrue(platform["阶段说明"])
+                for stage in stages:
+                    ctx = f"{platform['平台']} {stage['阶段标识']}"
+                    self.assertGreaterEqual(stage["开始小时"], 0, ctx)
                     self.assertGreaterEqual(
-                        stage["end_hour"], stage["start_hour"], ctx
+                        stage["结束小时"], stage["开始小时"], ctx
                     )
                     self.assertLessEqual(
-                        stage["end_hour"],
-                        time_plan["campaign_window_hours"],
+                        stage["结束小时"],
+                        platform["活动窗口小时"],
                         ctx,
                     )
                     self.assertEqual(
-                        stage["window"],
-                        f"T+{stage['start_hour']}h - T+{stage['end_hour']}h",
+                        stage["时间窗"],
+                        f"T+{stage['开始小时']}h - T+{stage['结束小时']}h",
                         ctx,
                     )
 
-                user_ids = [node["user_id"] for node in platform["selected_nodes"]]
+                user_ids = [node["数字人id"] for node in platform["选取节点明细"]]
                 self.assertEqual(
-                    len(user_ids), len(set(user_ids)), platform["platform_key"]
+                    len(user_ids), len(set(user_ids)), platform["平台"]
                 )
 
                 # 合格 / 待人工复核 / 不合格三层必须可机读，且与逐节点标记一致
-                tiers = platform["selected_safety_tiers"]
+                tiers = platform["安全等级分布"]
                 self.assertEqual(
                     sum(tiers.values()),
-                    platform["selected_count"],
-                    platform["platform_key"],
+                    platform["选取人数"],
+                    platform["平台"],
                 )
                 self.assertEqual(
-                    tiers["safe"],
+                    tiers["合格"],
                     sum(
                         1
-                        for node in platform["selected_nodes"]
-                        if node["safety_tier"] == "safe"
+                        for node in platform["选取节点明细"]
+                        if node["安全等级"] == "safe"
                     ),
-                    platform["platform_key"],
+                    platform["平台"],
                 )
                 self.assertEqual(
-                    platform["safe_shortfall_count"],
-                    max(0, platform["requested_count"] - tiers["safe"]),
-                    platform["platform_key"],
+                    platform["合格缺口"],
+                    max(0, platform["目标人数"] - tiers["合格"]),
+                    platform["平台"],
                 )
 
-                for node in platform["selected_nodes"]:
-                    self.assertTrue(node["platform_role"])
+                for node in platform["选取节点明细"]:
+                    self.assertTrue(node["平台角色"])
                     self.assertIn(
-                        node["safety_tier"],
+                        node["安全等级"],
                         {"safe", "review_required", "not_eligible"},
                     )
-                    self.assertIn("final_score", node)
-                    self.assertIn("platform_fit_score", node)
-                    self.assertIn("platform_dispatch_score", node)
-                    self.assertTrue(node["fit_basis"])
-                    self.assertIn("undeclared_inputs", node)
+                    self.assertIn("综合分", node)
+                    self.assertIn("平台适配分", node)
+                    self.assertIn("平台调度分", node)
+                    self.assertTrue(node["适配依据"])
+                    self.assertIn("未声明输入", node)
                     # 不合格节点绝不能被标记成合格/安全
-                    if node["safety_tier"] == "not_eligible":
-                        self.assertFalse(node["eligible"], node["user_id"])
-                    if node["risk_level"] == "high":
-                        self.assertFalse(node["eligible"], node["user_id"])
+                    if node["安全等级"] == "not_eligible":
+                        self.assertFalse(node["资格通过"], node["数字人id"])
+                    if node["风险等级"] == "high":
+                        self.assertFalse(node["资格通过"], node["数字人id"])
 
-            by_key = {platform["platform_key"]: platform for platform in platforms}
+            by_key = {platform["平台"]: platform for platform in platforms}
             facebook_sections = [
-                section["section_key"]
-                for section in by_key["facebook"]["content_plan"]["sections"]
+                section["环节标识"] for section in by_key["facebook"]["写作指引"]
             ]
             twitter_sections = [
-                section["section_key"]
-                for section in by_key["twitter"]["content_plan"]["sections"]
+                section["环节标识"] for section in by_key["twitter"]["写作指引"]
             ]
             instagram_sections = [
-                section["section_key"]
-                for section in by_key["instagram"]["content_plan"]["sections"]
+                section["环节标识"] for section in by_key["instagram"]["写作指引"]
             ]
             self.assertEqual(
                 {"post_theme", "core_viewpoint", "discussion_question", "risk_note"}
@@ -969,15 +993,15 @@ class MultiPlatformSmokeTest(unittest.TestCase):
 
             # 每个数字人只归属唯一模拟平台：跨平台重复选人必须为空
             self.assertEqual(
-                block["overlapping_user_ids"],
+                block["跨平台重复数字人"],
                 [],
                 "同一数字人不应被分配到多个平台",
             )
             # 平台适配分随平台权重变化，而不是 final_score 的副本
             fit_pairs = [
-                (node["final_score"], node["platform_fit_score"])
+                (node["综合分"], node["平台适配分"])
                 for platform in platforms
-                for node in platform["selected_nodes"]
+                for node in platform["选取节点明细"]
             ]
             self.assertTrue(fit_pairs)
             self.assertTrue(
@@ -991,11 +1015,15 @@ class MultiPlatformSmokeTest(unittest.TestCase):
             )
             latest_trace = self._read_json(latest_trace_dir / "07_final_output.json")
             self.assertEqual(latest_trace["run_label"], "multiplatform_facebook-twitter")
-            self.assertIn("多平台分发策略", latest_trace["payload"])
-            # trace 里留存的最终产物也必须已经是「无旧版策略」的多平台 JSON，
-            # 否则 trace 与最终业务结果会不一致。
-            self.assertNotIn("五维调度策略", latest_trace["payload"])
-            _assert_no_legacy_strategy_payload(self, latest_trace["payload"])
+            # trace 里留存的最终产物必须与业务结果一致，同为五维结构
+            self.assertEqual(
+                set(latest_trace["payload"].keys()),
+                {"事件名称", "五维调度策略", "输出格式版本"},
+            )
+            self.assertIn(
+                "各平台方案", latest_trace["payload"]["五维调度策略"]["平台"]
+            )
+            _assert_no_legacy_platform_markers(self, latest_trace["payload"])
 
             run_trace_labels = {
                 "multi_user/run_001": self._read_json(
@@ -1102,27 +1130,27 @@ class MultiPlatformSmokeTest(unittest.TestCase):
             payload = json.loads(mp_path.read_text(encoding="utf-8"))
             self.assertEqual(
                 set(payload.keys()),
-                {"事件名称", "多平台分发策略", "输出格式版本"},
+                {"事件名称", "五维调度策略", "输出格式版本"},
             )
-            _assert_no_legacy_strategy_payload(self, payload)
-            block = payload["多平台分发策略"]
-            self.assertEqual(block["campaign_window_hours"], 1)
+            _assert_no_legacy_platform_markers(self, payload)
+            platform_dimension = payload["五维调度策略"]["平台"]
+            block = platform_dimension["跨平台总览"]
+            self.assertEqual(block["活动窗口小时"], 1)
 
-            for platform in block["platforms"]:
-                plan = platform["time_plan"]
-                self.assertEqual(plan["campaign_window_hours"], 1)
-                self.assertTrue(plan["stage_schedule_note"])
-                for stage in plan["stages"]:
-                    ctx = f"{platform['platform_key']} {stage['stage_key']}"
-                    self.assertGreaterEqual(stage["start_hour"], 0, ctx)
+            for platform in platform_dimension["各平台方案"]:
+                self.assertEqual(platform["活动窗口小时"], 1)
+                self.assertTrue(platform["阶段说明"])
+                for stage in platform["时间阶段"]:
+                    ctx = f"{platform['平台']} {stage['阶段标识']}"
+                    self.assertGreaterEqual(stage["开始小时"], 0, ctx)
                     self.assertGreaterEqual(
-                        stage["end_hour"], stage["start_hour"], ctx
+                        stage["结束小时"], stage["开始小时"], ctx
                     )
-                    self.assertLessEqual(stage["end_hour"], 1, ctx)
-                    self.assertNotEqual(stage["window"], "T+1h - T+2h", ctx)
+                    self.assertLessEqual(stage["结束小时"], 1, ctx)
+                    self.assertNotEqual(stage["时间窗"], "T+1h - T+2h", ctx)
 
     def test_multi_user_mode_keeps_legacy_payload_only(self) -> None:
-        """回归：多人分发（未指定平台参数）仍是旧版五维调度策略，不混入多平台结果。"""
+        """回归：多人分发（未指定平台参数）保持五维调度策略，且不含跨平台专属内容。"""
 
         input_path = _hot_event_input_path()
         self.assertTrue(input_path.exists(), f"缺少 hot_event 测试集：{input_path}")
@@ -1148,6 +1176,10 @@ class MultiPlatformSmokeTest(unittest.TestCase):
                 payload["输出格式版本"], "action_schema_v5_five_dimensions_minimal"
             )
             self.assertNotIn("多平台分发策略", payload)
+            # 跨平台专属的「跨平台总览 / 各平台方案」不得出现在多人分发结果里
+            multi_user_platform = payload["五维调度策略"]["平台"]
+            self.assertNotIn("跨平台总览", multi_user_platform)
+            self.assertNotIn("各平台方案", multi_user_platform)
 
             strategy = payload["五维调度策略"]
             for dimension in ("目标对象", "时间", "频率", "平台", "内容"):

@@ -611,13 +611,16 @@ class EvalHotEventsTest(unittest.TestCase):
                 (event_trace_dir / "07_final_output.json").read_text(encoding="utf-8")
             )
             self.assertEqual(second_final["run_label"], "multiplatform_facebook-twitter")
-            self.assertIn("多平台分发策略", second_final["payload"])
-            # 多平台最终产物是独立构造的：不含旧版五维调度策略
+            # 跨平台与多人分发共用同一套五维调度策略输出契约，
+            # 平台差异集中在「平台」维度下的各平台方案。
             self.assertEqual(
                 set(second_final["payload"].keys()),
-                {"事件名称", "多平台分发策略", "输出格式版本"},
+                {"事件名称", "五维调度策略", "输出格式版本"},
             )
-            self.assertNotIn("五维调度策略", second_final["payload"])
+            self.assertIn(
+                "各平台方案",
+                second_final["payload"]["五维调度策略"]["平台"],
+            )
 
             archive_name = second_final["previous_run_archive"]
             self.assertIsNotNone(
@@ -705,8 +708,11 @@ class EvalHotEventsTest(unittest.TestCase):
                 (event_trace_dir / "07_final_output.json").read_text(encoding="utf-8")
             )
             self.assertEqual(current["run_label"], "multiplatform_twitter")
-            self.assertIn("多平台分发策略", current["payload"])
-            self.assertNotIn("五维调度策略", current["payload"])
+            self.assertIn("五维调度策略", current["payload"])
+            self.assertIn(
+                "各平台方案",
+                current["payload"]["五维调度策略"]["平台"],
+            )
 
     def _write_minimal_workspace(self, root: Path) -> None:
         raw_dir = root / "data" / "raw"

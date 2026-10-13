@@ -140,6 +140,29 @@ class StrategyGenerator:
             strategy=strategy,
         )
 
+    def build_node_plan_from_strategy(
+        self,
+        *,
+        node: SelectedNode,
+        strategy: DispatchStrategy,
+        bucket: str = "primary",
+    ) -> StrategyNodePlan:
+        """用已有策略的时间/频率/内容计划补全单个节点的行动级字段。
+
+        开多平台分发时，每个平台的选人由 ``PlatformDispatcher`` 独立完成、并不
+        经过 ``Selector``；但"被选中的数字人该在哪个阶段、以什么频率、用哪种
+        内容风格执行"必须与多人分发完全同源。这里复用 ``generate`` 使用的同一段
+        节点规划逻辑，避免调用方各自推导而使两种模式的动作口径漂移。
+        """
+
+        return self._build_node_plan(
+            node=node,
+            time_plan=strategy.time_plan,
+            frequency_plan=strategy.frequency_plan,
+            content_plan=strategy.content_plan,
+            bucket=bucket,
+        )
+
     def to_frame(self, strategy_result: StrategyResult, bucket: str = "primary") -> pd.DataFrame:
         if bucket == "fallback":
             rows = [item.model_dump() for item in strategy_result.fallback_nodes]
