@@ -1,0 +1,26 @@
+{
+  "input_path": "data\\derived\\weibo_profile_reworked_with_neighbors.graph.anon",
+  "output_path": "data\\derived\\weibo_profile_reworked_with_neighbors_with_platform.graph.anon",
+  "node_count": 35636,
+  "platform_values": [
+    "facebook_simulated",
+    "instagram_simulated",
+    "twitter_simulated"
+  ],
+  "platform_counts": {
+    "twitter_simulated": 11953,
+    "instagram_simulated": 11847,
+    "facebook_simulated": 11836
+  },
+  "platform_ratios": {
+    "twitter_simulated": 0.335419,
+    "instagram_simulated": 0.332445,
+    "facebook_simulated": 0.332136
+  },
+  "seed": 20260624,
+  "notes": [
+    "每个 user_id 通过稳定哈希确定性映射到一个模拟平台",
+    "platform 字段取值形如 facebook_simulated / instagram_simulated / twitter_simulated",
+    "同一输入 + 同一 seed 永远得到同一分配结果，可复现"
+  ]
+}

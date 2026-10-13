@@ -1,0 +1,490 @@
+{
+  "source_count": 35636,
+  "projected_count": 35636,
+  "platform_counts": {
+    "twitter_simulated": 11953,
+    "instagram_simulated": 11847,
+    "facebook_simulated": 11836
+  },
+  "platform_ratios": {
+    "twitter_simulated": 0.335419,
+    "instagram_simulated": 0.332445,
+    "facebook_simulated": 0.332136
+  },
+  "follower_tier_counts": {
+    "low(1-99)": 10114,
+    "mid(100-999)": 8832,
+    "head(10k+)": 6853,
+    "dormant(<1)": 5240,
+    "high(1k-9.9k)": 4597
+  },
+  "interaction_tier_counts": {
+    "light(1-4)": 24022,
+    "active(5-19)": 7384,
+    "busy(20-99)": 3159,
+    "viral(100+)": 1071
+  },
+  "user_index": {
+    "social": 34680,
+    "interests_empty": 956,
+    "isolated": 5,
+    "has_interactions": 35631,
+    "no_neighbor": 5
+  },
+  "unique_interest_tags": 13114,
+  "top_interests": [
+    {
+      "interest": "美食",
+      "count": 6357
+    },
+    {
+      "interest": "旅游",
+      "count": 3405
+    },
+    {
+      "interest": "摄影",
+      "count": 2311
+    },
+    {
+      "interest": "文学",
+      "count": 1879
+    },
+    {
+      "interest": "社交",
+      "count": 1751
+    },
+    {
+      "interest": "旅行",
+      "count": 1344
+    },
+    {
+      "interest": "健康",
+      "count": 1269
+    },
+    {
+      "interest": "情感",
+      "count": 1235
+    },
+    {
+      "interest": "时尚",
+      "count": 1073
+    },
+    {
+      "interest": "生活",
+      "count": 980
+    },
+    {
+      "interest": "幽默",
+      "count": 956
+    },
+    {
+      "interest": "励志",
+      "count": 850
+    },
+    {
+      "interest": "音乐",
+      "count": 760
+    },
+    {
+      "interest": "镇魂",
+      "count": 745
+    },
+    {
+      "interest": "节日庆祝",
+      "count": 724
+    },
+    {
+      "interest": "教育",
+      "count": 656
+    },
+    {
+      "interest": "宠物",
+      "count": 627
+    },
+    {
+      "interest": "自然风光",
+      "count": 544
+    },
+    {
+      "interest": "人际关系",
+      "count": 533
+    },
+    {
+      "interest": "家庭",
+      "count": 521
+    },
+    {
+      "interest": "娱乐",
+      "count": 514
+    },
+    {
+      "interest": "自我提升",
+      "count": 505
+    },
+    {
+      "interest": "自然",
+      "count": 477
+    },
+    {
+      "interest": "诗歌",
+      "count": 475
+    },
+    {
+      "interest": "社交媒体",
+      "count": 473
+    },
+    {
+      "interest": "艺术",
+      "count": 449
+    },
+    {
+      "interest": "科技",
+      "count": 447
+    },
+    {
+      "interest": "心理学",
+      "count": 432
+    },
+    {
+      "interest": "游戏",
+      "count": 427
+    },
+    {
+      "interest": "生活感悟",
+      "count": 423
+    },
+    {
+      "interest": "烹饪",
+      "count": 418
+    },
+    {
+      "interest": "微博",
+      "count": 396
+    },
+    {
+      "interest": "日常生活",
+      "count": 386
+    },
+    {
+      "interest": "生活哲学",
+      "count": 375
+    },
+    {
+      "interest": "浪漫",
+      "count": 345
+    },
+    {
+      "interest": "心理健康",
+      "count": 340
+    },
+    {
+      "interest": "积极心态",
+      "count": 335
+    },
+    {
+      "interest": "生活方式",
+      "count": 327
+    },
+    {
+      "interest": "自然景观",
+      "count": 318
+    },
+    {
+      "interest": "汽车",
+      "count": 316
+    },
+    {
+      "interest": "育儿",
+      "count": 286
+    },
+    {
+      "interest": "电影",
+      "count": 281
+    },
+    {
+      "interest": "可爱",
+      "count": 281
+    },
+    {
+      "interest": "阅读",
+      "count": 272
+    },
+    {
+      "interest": "个人成长",
+      "count": 267
+    },
+    {
+      "interest": "搞笑",
+      "count": 264
+    },
+    {
+      "interest": "抽奖活动",
+      "count": 264
+    },
+    {
+      "interest": "美容",
+      "count": 242
+    },
+    {
+      "interest": "咖啡",
+      "count": 242
+    },
+    {
+      "interest": "节日祝福",
+      "count": 242
+    }
+  ],
+  "top_influencers": [
+    {
+      "user_id": "513",
+      "user_name": "user_513",
+      "platform": "facebook_simulated",
+      "user_followers": 240068995,
+      "user_interests": [
+        "主持人",
+        "电影一闪一闪亮星星",
+        "国剧盛典",
+        "理想生活季",
+        "哲学"
+      ]
+    },
+    {
+      "user_id": "21181",
+      "user_name": "user_21181",
+      "platform": "twitter_simulated",
+      "user_followers": 40619832,
+      "user_interests": [
+        "新年祝福",
+        "摄影",
+        "旅行",
+        "健康",
+        "家庭幸福"
+      ]
+    },
+    {
+      "user_id": "190927",
+      "user_name": "user_190927",
+      "platform": "instagram_simulated",
+      "user_followers": 26289572,
+      "user_interests": [
+        "摄影",
+        "生活记录",
+        "社交媒体活动"
+      ]
+    },
+    {
+      "user_id": "223292",
+      "user_name": "user_223292",
+      "platform": "twitter_simulated",
+      "user_followers": 17698874,
+      "user_interests": [
+        "公益",
+        "慈善",
+        "募捐信息平台",
+        "互联网"
+      ]
+    },
+    {
+      "user_id": "67974",
+      "user_name": "user_67974",
+      "platform": "instagram_simulated",
+      "user_followers": 16287587,
+      "user_interests": [
+        "综艺",
+        "旅游",
+        "街舞",
+        "B站跨年",
+        "吴彤"
+      ]
+    },
+    {
+      "user_id": "185",
+      "user_name": "user_185",
+      "platform": "facebook_simulated",
+      "user_followers": 16153761,
+      "user_interests": [
+        "抽奖活动",
+        "美妆",
+        "新年祝福",
+        "旅行摄影",
+        "健康产品"
+      ]
+    },
+    {
+      "user_id": "76441",
+      "user_name": "user_76441",
+      "platform": "facebook_simulated",
+      "user_followers": 15472538,
+      "user_interests": [
+        "旅游出行",
+        "美食",
+        "美女",
+        "搞笑幽默",
+        "汽车"
+      ]
+    },
+    {
+      "user_id": "24897",
+      "user_name": "user_24897",
+      "platform": "instagram_simulated",
+      "user_followers": 12462554,
+      "user_interests": [
+        "电视剧",
+        "娱乐圈",
+        "微博互动"
+      ]
+    },
+    {
+      "user_id": "190920",
+      "user_name": "user_190920",
+      "platform": "twitter_simulated",
+      "user_followers": 11069356,
+      "user_interests": [
+        "旅游",
+        "大海",
+        "V影响力",
+        "微视频",
+        "福布斯30 under 30"
+      ]
+    },
+    {
+      "user_id": "45225",
+      "user_name": "user_45225",
+      "platform": "instagram_simulated",
+      "user_followers": 10072677,
+      "user_interests": [
+        "社交媒体",
+        "微博",
+        "内容推广"
+      ]
+    },
+    {
+      "user_id": "89877",
+      "user_name": "user_89877",
+      "platform": "instagram_simulated",
+      "user_followers": 10065246,
+      "user_interests": [
+        "旅行"
+      ]
+    },
+    {
+      "user_id": "123058",
+      "user_name": "user_123058",
+      "platform": "facebook_simulated",
+      "user_followers": 9481625,
+      "user_interests": [
+        "诗词",
+        "文化"
+      ]
+    },
+    {
+      "user_id": "112958",
+      "user_name": "user_112958",
+      "platform": "twitter_simulated",
+      "user_followers": 9426861,
+      "user_interests": [
+        "旅行",
+        "北京",
+        "摄影",
+        "文化遗址",
+        "博物馆"
+      ]
+    },
+    {
+      "user_id": "181566",
+      "user_name": "user_181566",
+      "platform": "instagram_simulated",
+      "user_followers": 8202488,
+      "user_interests": [
+        "旅游",
+        "摄影",
+        "美食",
+        "电视节目"
+      ]
+    },
+    {
+      "user_id": "190926",
+      "user_name": "user_190926",
+      "platform": "facebook_simulated",
+      "user_followers": 7330428,
+      "user_interests": [
+        "旅游",
+        "摄影",
+        "视频VLOG",
+        "汽车",
+        "手机"
+      ]
+    },
+    {
+      "user_id": "104785",
+      "user_name": "user_104785",
+      "platform": "twitter_simulated",
+      "user_followers": 6815996,
+      "user_interests": [
+        "美食",
+        "旅行",
+        "美食探店",
+        "美食制作",
+        "美食摄影"
+      ]
+    },
+    {
+      "user_id": "163878",
+      "user_name": "user_163878",
+      "platform": "instagram_simulated",
+      "user_followers": 6459949,
+      "user_interests": [
+        "电子竞技",
+        "王者荣耀",
+        "体育",
+        "游泳",
+        "奥运会"
+      ]
+    },
+    {
+      "user_id": "81724",
+      "user_name": "user_81724",
+      "platform": "facebook_simulated",
+      "user_followers": 6330564,
+      "user_interests": [
+        "心理学",
+        "社会学",
+        "历史",
+        "美食",
+        "游戏"
+      ]
+    },
+    {
+      "user_id": "99315",
+      "user_name": "user_99315",
+      "platform": "facebook_simulated",
+      "user_followers": 6090380,
+      "user_interests": [
+        "旅行",
+        "汽车",
+        "摄影",
+        "美食",
+        "酒店"
+      ]
+    },
+    {
+      "user_id": "84871",
+      "user_name": "user_84871",
+      "platform": "instagram_simulated",
+      "user_followers": 5925291,
+      "user_interests": [
+        "旅游",
+        "自然风光"
+      ]
+    }
+  ],
+  "projection_notes": [
+    "neighbors 数组已剥离，需要细粒度关系数据请直接看原文件",
+    "每个用户的 user_interests 仅保留前 8 个标签",
+    "follower_tier 段位：dormant(<1) / low(1-99) / mid(100-999) / high(1k-9.9k) / head(10k+)",
+    "interaction_tier 段位：silent(0) / light(1-4) / active(5-19) / busy(20-99) / viral(100+)"
+  ],
+  "input_path": "data\\derived\\weibo_profile_reworked_with_neighbors_with_platform.graph.anon",
+  "jsonl_path": "data\\derived\\weibo_profile_reworked_readable.jsonl",
+  "preview_path": "data\\derived\\weibo_profile_reworked_readable_preview.json"
+}

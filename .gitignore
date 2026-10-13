@@ -42,7 +42,6 @@ ENV/
 .settings/
 
 # 数据 / 输出（按需保留 data/ 中的样本数据）
-data/
 outputs/
 *.log
 *.tmp
