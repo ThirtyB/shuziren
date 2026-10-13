@@ -1,0 +1,75 @@
+# 环境变量 / 密钥
+.env
+.env.local
+.env.*.local
+
+# Python 缓存与构建产物
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# 虚拟环境
+.venv/
+venv/
+env/
+ENV/
+
+# IDE / 编辑器
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# 数据 / 输出（按需保留 data/ 中的样本数据）
+data/
+outputs/
+*.log
+*.tmp
+*.bak
+
+# 系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 多文档产物（按需保留 docx/ 目录中的文档资料）
+# *.docx
+
+# Node / 前端
+node_modules/
+web/frontend/dist/
+web/frontend/build/
+web/frontend/.vite/
+*.tsbuildinfo
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# 评测/调试输出
+eval/_smoke_out/
+eval/_smoke_trace/
+eval/output/
+eval/.cache/
+*.pyc
+.ipynb_checkpoints/
