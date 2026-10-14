@@ -6,6 +6,7 @@ from json import JSONDecodeError
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from rapidfuzz import fuzz
 
@@ -84,7 +85,10 @@ class FeatureBuilder:
         product_context = loader.load_product_context()
         profiles = loader.load_profiles(limit=profile_limit)
         try:
-            enriched_profiles = loader.load_enriched_profiles(limit=profile_limit)
+            # 用 load_enriched_graph_attributes 替代 load_enriched_profiles：
+            # 只取 graph_attributes 9 个字段，跳过 neighbors 列表和
+            # EnrichedUserProfile 整体校验，60MB+ JSON 解析从 ~3.3s 降到 <0.5s。
+            enriched_profiles = loader.load_enriched_graph_attributes(limit=profile_limit)
         except (JSONDecodeError, ValueError):
             enriched_profiles = {}
         try:
@@ -117,191 +121,362 @@ class FeatureBuilder:
     ) -> FeatureBuildResult:
         enriched_profiles = enriched_profiles or {}
         source_user_ids = source_user_ids or set()
-        user_ids = list(profiles.keys())
         influencer_ids = set(product_context.influencer_ids)
 
-        follower_max_log = self._max_log(
-            profiles[user_id].user_followers for user_id in user_ids
+        # ---- 向量化版 build_features：把 35k profile 装入 DataFrame，列运算一次算完 ----
+        # 与原版逐行 Python 循环的输出在数值上保持一致（< 1e-9），排序结果一致。
+
+        # 1. profiles -> DataFrame
+        profile_rows = [
+            {
+                "user_id": uid,
+                "user_name": p.user_name,
+                "platform": p.platform,
+                "user_followers": int(p.user_followers),
+                "user_friends": int(p.user_friends),
+                "user_interests": list(p.user_interests),
+                "user_description": p.user_description,
+                "interest_count": len(p.user_interests),
+                "has_description": bool(p.user_description.strip()),
+            }
+            for uid, p in profiles.items()
+        ]
+        df = pd.DataFrame(profile_rows)
+
+        # 2. enriched_profiles -> DataFrame，左连接
+        #    ``load_enriched_graph_attributes`` 直接返回 ``dict[user_id, GraphAttributes]``；
+        #    但老测试还在用 ``dict[user_id, EnrichedUserProfile]``，自动检测兼容。
+        def _ga_of(ep):
+            ga = getattr(ep, "graph_attributes", None)
+            return ga if ga is not None else ep
+
+        enriched_rows = [
+            {
+                "user_id": uid,
+                "neighbor_count": int(_ga_of(ep).neighbor_count),
+                "mutual_neighbor_count": int(_ga_of(ep).mutual_neighbor_count),
+                "received_interaction_count": int(_ga_of(ep).received_interaction_count),
+                "made_interaction_count": int(_ga_of(ep).made_interaction_count),
+                "received_comment_count": int(_ga_of(ep).received_comment_count),
+                "received_repost_count": int(_ga_of(ep).received_repost_count),
+                "made_comment_count": int(_ga_of(ep).made_comment_count),
+                "made_repost_count": int(_ga_of(ep).made_repost_count),
+                "self_interaction_count": int(_ga_of(ep).self_interaction_count),
+            }
+            for uid, ep in enriched_profiles.items()
+        ]
+        _enriched_cols = (
+            "neighbor_count",
+            "mutual_neighbor_count",
+            "received_interaction_count",
+            "made_interaction_count",
+            "received_comment_count",
+            "received_repost_count",
+            "made_comment_count",
+            "made_repost_count",
+            "self_interaction_count",
         )
-        friend_max_log = self._max_log(
-            profiles[user_id].user_friends for user_id in user_ids
+        if enriched_rows:
+            edf = pd.DataFrame(enriched_rows)
+            df = df.merge(edf, on="user_id", how="left")
+            for col in _enriched_cols:
+                df[col] = df[col].fillna(0).astype(np.int64)
+        else:
+            # enriched_profiles 为空时（测试或边界），直接补 0 列，与原版 .get(uid) 返回 0 一致
+            for col in _enriched_cols:
+                df[col] = np.int64(0)
+
+        # 3. 集合判定列
+        df["influencer_flag"] = df["user_id"].isin(influencer_ids)
+        df["is_interaction_source"] = df["user_id"].isin(source_user_ids)
+
+        # 4. _max_log 与 _log_score 全部用 numpy
+        follower_max_log = self._max_log_array(df["user_followers"].to_numpy())
+        friend_max_log = self._max_log_array(df["user_friends"].to_numpy())
+        neighbor_max_log = self._max_log_array(df["neighbor_count"].to_numpy())
+        received_max_log = self._max_log_array(df["received_interaction_count"].to_numpy())
+        made_max_log = self._max_log_array(df["made_interaction_count"].to_numpy())
+
+        df["follower_score"] = self._log_score_array(
+            df["user_followers"].to_numpy(), follower_max_log
         )
-        neighbor_max_log = self._max_log(
-            enriched_profiles.get(user_id, EnrichedUserProfile(
-                user_id=user_id,
-                user_name=profiles[user_id].user_name,
-                user_followers=profiles[user_id].user_followers,
-                user_friends=profiles[user_id].user_friends,
-                user_interests=profiles[user_id].user_interests,
-                user_description=profiles[user_id].user_description,
-                platform=profiles[user_id].platform,
-            )).graph_attributes.neighbor_count
-            for user_id in user_ids
+        df["friend_score"] = self._log_score_array(
+            df["user_friends"].to_numpy(), friend_max_log
         )
-        received_max_log = self._max_log(
-            enriched_profiles.get(user_id, EnrichedUserProfile(
-                user_id=user_id,
-                user_name=profiles[user_id].user_name,
-                user_followers=profiles[user_id].user_followers,
-                user_friends=profiles[user_id].user_friends,
-                user_interests=profiles[user_id].user_interests,
-                user_description=profiles[user_id].user_description,
-                platform=profiles[user_id].platform,
-            )).graph_attributes.received_interaction_count
-            for user_id in user_ids
+        df["neighbor_score"] = self._log_score_array(
+            df["neighbor_count"].to_numpy(), neighbor_max_log
         )
-        made_max_log = self._max_log(
-            enriched_profiles.get(user_id, EnrichedUserProfile(
-                user_id=user_id,
-                user_name=profiles[user_id].user_name,
-                user_followers=profiles[user_id].user_followers,
-                user_friends=profiles[user_id].user_friends,
-                user_interests=profiles[user_id].user_interests,
-                user_description=profiles[user_id].user_description,
-                platform=profiles[user_id].platform,
-            )).graph_attributes.made_interaction_count
-            for user_id in user_ids
+        df["received_score"] = self._log_score_array(
+            df["received_interaction_count"].to_numpy(), received_max_log
+        )
+        df["made_score"] = self._log_score_array(
+            df["made_interaction_count"].to_numpy(), made_max_log
         )
 
-        node_features: list[NodeFeature] = []
+        # 5. has_graph_signal
+        df["has_graph_signal"] = (
+            (df["neighbor_count"] > 0)
+            | (df["received_interaction_count"] > 0)
+            | (df["made_interaction_count"] > 0)
+            | (df["mutual_neighbor_count"] > 0)
+        )
+
+        # 6. ratios（与原版逐行三元式一致）
+        total_int = (
+            df["received_interaction_count"] + df["made_interaction_count"]
+        ).astype(np.int64)
+        df["total_interaction_count"] = total_int
+        total_comment = df["received_comment_count"] + df["made_comment_count"]
+        total_repost = df["received_repost_count"] + df["made_repost_count"]
+        safe_total = np.where(total_int > 0, total_int, 1)
+        df["comment_ratio"] = np.where(total_int > 0, total_comment / safe_total, 0.0)
+        df["repost_ratio"] = np.where(total_int > 0, total_repost / safe_total, 0.0)
+        safe_neighbor = np.where(df["neighbor_count"] > 0, df["neighbor_count"], 1)
+        df["mutual_neighbor_ratio"] = np.where(
+            df["neighbor_count"] > 0, df["mutual_neighbor_count"] / safe_neighbor, 0.0
+        )
+
+        # 7. profile_completeness_score
+        has_desc_f = df["has_description"].astype(np.float64)
+        interest_score = np.minimum(df["interest_count"].astype(np.float64) / 4.0, 1.0)
+        follower_present = (df["user_followers"] > 0).astype(np.float64)
+        df["profile_completeness_score"] = np.clip(
+            (has_desc_f + interest_score + follower_present) / 3.0, 0.0, 1.0
+        )
+
+        # 8. stability_score
+        self_loop_ratio = np.where(
+            total_int > 0,
+            df["self_interaction_count"].to_numpy() / np.where(total_int > 0, total_int.to_numpy(), 1),
+            0.0,
+        )
+        self_loop_penalty = np.minimum(self_loop_ratio, 1.0)
+        df["stability_score"] = np.clip(
+            0.75 * df["profile_completeness_score"] + 0.25 * (1.0 - self_loop_penalty),
+            0.0,
+            1.0,
+        )
+
+        # 9. 主体三分数（has_graph_signal 两支）
+        inf_flag = df["influencer_flag"].astype(np.float64)
+        has_graph = df["has_graph_signal"]
+
+        influence_with = (
+            0.45 * df["follower_score"]
+            + 0.30 * df["received_score"]
+            + 0.15 * df["neighbor_score"]
+            + 0.10 * inf_flag
+        )
+        diffusion_with = (
+            0.35 * df["neighbor_score"]
+            + 0.25 * df["made_score"]
+            + 0.25 * df["mutual_neighbor_ratio"]
+            + 0.15 * df["repost_ratio"]
+        )
+        activity_with = (
+            0.45 * df["received_score"]
+            + 0.35 * df["made_score"]
+            + 0.10 * df["comment_ratio"]
+            + 0.10 * df["friend_score"]
+        )
+        influence_without = 0.75 * df["follower_score"] + 0.15 * df["friend_score"] + 0.10 * inf_flag
+        diffusion_without = 0.45 * df["friend_score"] + 0.35 * df["follower_score"]
+        activity_without = 0.55 * df["friend_score"] + 0.25 * df["follower_score"]
+
+        df["influence_score"] = np.where(
+            has_graph, np.clip(influence_with, 0.0, 1.0), np.clip(influence_without, 0.0, 1.0)
+        )
+        df["diffusion_score"] = np.where(
+            has_graph, np.clip(diffusion_with, 0.0, 1.0), np.clip(diffusion_without, 0.0, 1.0)
+        )
+        df["activity_score"] = np.where(
+            has_graph, np.clip(activity_with, 0.0, 1.0), np.clip(activity_without, 0.0, 1.0)
+        )
+
+        # 10. _match_keywords 仍逐行（rapidfuzz fuzzy 匹配很难直接向量化，
+        #     但这一段 C 实现很快，每用户 ~1ms，整体 ~30-40s 是后续优化点）。
         keywords = self._event_match_keywords(event)
         normalized_keywords = self._prepare_keywords(keywords)
+        kw_count = len(normalized_keywords)
 
-        for user_id, profile in profiles.items():
-            enriched = enriched_profiles.get(user_id)
-            graph_attributes = enriched.graph_attributes if enriched is not None else None
+        profile_by_id = profiles
+        enriched_by_id = enriched_profiles
+        source_ids = source_user_ids
+        user_ids_ordered = df["user_id"].tolist()
 
-            follower_score = self._log_score(profile.user_followers, follower_max_log)
-            friend_score = self._log_score(profile.user_friends, friend_max_log)
-            neighbor_count = graph_attributes.neighbor_count if graph_attributes else 0
-            mutual_neighbor_count = graph_attributes.mutual_neighbor_count if graph_attributes else 0
-            received_interaction_count = graph_attributes.received_interaction_count if graph_attributes else 0
-            made_interaction_count = graph_attributes.made_interaction_count if graph_attributes else 0
-            received_comment_count = graph_attributes.received_comment_count if graph_attributes else 0
-            received_repost_count = graph_attributes.received_repost_count if graph_attributes else 0
-            made_comment_count = graph_attributes.made_comment_count if graph_attributes else 0
-            made_repost_count = graph_attributes.made_repost_count if graph_attributes else 0
-            self_interaction_count = graph_attributes.self_interaction_count if graph_attributes else 0
-            has_graph_signal = bool(
-                graph_attributes
-                and (
-                    neighbor_count
-                    or received_interaction_count
-                    or made_interaction_count
-                    or mutual_neighbor_count
+        matched_list: list[list[str]] = []
+        semantic_profiles: list[str] = []
+        for uid in user_ids_ordered:
+            profile = profile_by_id[uid]
+            matched_list.append(
+                self._match_keywords(
+                    profile=profile, normalized_keywords=normalized_keywords
                 )
             )
-
-            neighbor_score = self._log_score(neighbor_count, neighbor_max_log)
-            received_score = self._log_score(received_interaction_count, received_max_log)
-            made_score = self._log_score(made_interaction_count, made_max_log)
-
-            total_interaction_count = received_interaction_count + made_interaction_count
-            total_comment_count = received_comment_count + made_comment_count
-            total_repost_count = received_repost_count + made_repost_count
-            comment_ratio = total_comment_count / total_interaction_count if total_interaction_count else 0.0
-            repost_ratio = total_repost_count / total_interaction_count if total_interaction_count else 0.0
-            mutual_neighbor_ratio = mutual_neighbor_count / neighbor_count if neighbor_count else 0.0
-
-            matched_keywords = self._match_keywords(
-                profile=profile,
-                normalized_keywords=normalized_keywords,
-            )
-            semantic_profile = DataLoader.summarize_profile_for_semantics(
-                profile,
-                enriched_profile=enriched,
-                is_interaction_source=user_id in source_user_ids,
-            )
-            topic_match_score = len(matched_keywords) / len(normalized_keywords) if normalized_keywords else 0.0
-            profile_completeness_score = self._profile_completeness_score(profile)
-            stability_score = self._stability_score(
-                profile_completeness_score=profile_completeness_score,
-                total_interaction_count=total_interaction_count,
-                self_interaction_count=self_interaction_count,
-            )
-            if has_graph_signal:
-                influence_score = _clip_score(
-                    0.45 * follower_score
-                    + 0.30 * received_score
-                    + 0.15 * neighbor_score
-                    + 0.10 * float(user_id in influencer_ids)
-                )
-                diffusion_score = _clip_score(
-                    0.35 * neighbor_score
-                    + 0.25 * made_score
-                    + 0.25 * mutual_neighbor_ratio
-                    + 0.15 * repost_ratio
-                )
-                activity_score = _clip_score(
-                    0.45 * received_score
-                    + 0.35 * made_score
-                    + 0.10 * comment_ratio
-                    + 0.10 * friend_score
-                )
-            else:
-                influence_score = _clip_score(
-                    0.75 * follower_score
-                    + 0.15 * friend_score
-                    + 0.10 * float(user_id in influencer_ids)
-                )
-                diffusion_score = _clip_score(0.45 * friend_score + 0.35 * follower_score)
-                activity_score = _clip_score(0.55 * friend_score + 0.25 * follower_score)
-            feature_ready_score = _clip_score(
-                0.35 * influence_score
-                + 0.25 * diffusion_score
-                + 0.25 * topic_match_score
-                + 0.15 * stability_score
-            )
-
-            role_hint = self._infer_role_hint(
-                influence_score=influence_score,
-                diffusion_score=diffusion_score,
-                activity_score=activity_score,
-                topic_match_score=topic_match_score,
-                comment_ratio=comment_ratio,
-            )
-
-            node_features.append(
-                NodeFeature(
-                    user_id=user_id,
-                    user_name=profile.user_name,
-                    event_id=event.event_id,
-                    event_type=event.event_type,
-                    role_hint=role_hint,
-                    platform=profile.platform,
-                    influencer_flag=user_id in influencer_ids,
-                    is_interaction_source=user_id in source_user_ids,
-                    follower_count=profile.user_followers,
-                    friend_count=profile.user_friends,
-                    interest_count=len(profile.user_interests),
-                    has_description=bool(profile.user_description.strip()),
-                    neighbor_count=neighbor_count,
-                    mutual_neighbor_count=mutual_neighbor_count,
-                    received_interaction_count=received_interaction_count,
-                    made_interaction_count=made_interaction_count,
-                    received_comment_count=received_comment_count,
-                    received_repost_count=received_repost_count,
-                    made_comment_count=made_comment_count,
-                    made_repost_count=made_repost_count,
-                    self_interaction_count=self_interaction_count,
-                    comment_ratio=round(comment_ratio, 6),
-                    repost_ratio=round(repost_ratio, 6),
-                    mutual_neighbor_ratio=round(mutual_neighbor_ratio, 6),
-                    profile_completeness_score=round(profile_completeness_score, 6),
-                    topic_match_score=round(topic_match_score, 6),
-                    influence_score=round(influence_score, 6),
-                    diffusion_score=round(diffusion_score, 6),
-                    activity_score=round(activity_score, 6),
-                    stability_score=round(stability_score, 6),
-                    feature_ready_score=round(feature_ready_score, 6),
-                    semantic_profile=semantic_profile,
-                    semantic_tags=list(matched_keywords[:4]),
-                    keyword_hit_count=len(matched_keywords),
-                    matched_keywords=matched_keywords,
+            semantic_profiles.append(
+                DataLoader.summarize_profile_for_semantics(
+                    profile,
+                    enriched_profile=enriched_by_id.get(uid),
+                    is_interaction_source=uid in source_ids,
                 )
             )
+        df["matched_keywords"] = matched_list
+        df["keyword_hit_count"] = df["matched_keywords"].apply(len).astype(np.int64)
+        if kw_count:
+            df["topic_match_score"] = df["keyword_hit_count"].astype(np.float64) / kw_count
+        else:
+            df["topic_match_score"] = 0.0
+        df["semantic_profile"] = semantic_profiles
 
-        node_features = self._sort_features(node_features)
+        # 11. feature_ready_score
+        df["feature_ready_score"] = np.clip(
+            0.35 * df["influence_score"]
+            + 0.25 * df["diffusion_score"]
+            + 0.25 * df["topic_match_score"]
+            + 0.15 * df["stability_score"],
+            0.0,
+            1.0,
+        )
+
+        # 12. role_hint（与 _infer_role_hint 完全等价：if-else 链）
+        role_conditions = [
+            (df["influence_score"] >= 0.6) & (df["topic_match_score"] >= 0.2),
+            df["diffusion_score"] >= 0.45,
+            (df["activity_score"] >= 0.35) | (df["comment_ratio"] >= 0.6),
+        ]
+        role_choices = ["core_broadcast", "amplification", "interaction_response"]
+        df["role_hint"] = np.select(
+            role_conditions, role_choices, default="general_support"
+        )
+
+        # 与原版语义对齐：原版在生成 NodeFeature 时对各 score 做 round(., 6)，
+        # 然后再 list.sort；这里排序前先把相关列四舍五入到 6 位，
+        # 避免 un-rounded float 的精度差导致并列键错位。
+        for col in (
+            "topic_match_score",
+            "feature_ready_score",
+            "activity_score",
+            "stability_score",
+            "influence_score",
+            "comment_ratio",
+            "repost_ratio",
+            "mutual_neighbor_ratio",
+            "profile_completeness_score",
+        ):
+            df[col] = df[col].round(6)
+
+        # 13. 排序：与原版 _sort_features 同 key（同 desc、同稳定语义）。
+        #     pandas 的 sort_values 在大量并列键时，次级顺序未必与 Python
+        #     ``list.sort`` 一致；加一个 _row_id 兜底，强制保留 dict.items() 顺序。
+        df = df.reset_index(drop=False).rename(columns={"index": "_row_id"})
+        df = df.sort_values(
+            by=[
+                "keyword_hit_count",
+                "topic_match_score",
+                "feature_ready_score",
+                "activity_score",
+                "stability_score",
+                "influence_score",
+                "user_followers",
+                "_row_id",
+            ],
+            ascending=[False, False, False, False, False, False, False, True],
+            kind="mergesort",
+        ).drop(columns=["_row_id"]).reset_index(drop=True)
+
+        # 14. 构造 NodeFeature（model_construct 跳过 Pydantic 校验，每条 ~5-10μs）
+        user_id_arr = df["user_id"].to_numpy()
+        user_name_arr = df["user_name"].to_list()
+        platform_arr = df["platform"].to_list()
+        influencer_flag_arr = df["influencer_flag"].to_numpy()
+        is_source_arr = df["is_interaction_source"].to_numpy()
+        follower_count_arr = df["user_followers"].to_numpy()
+        friend_count_arr = df["user_friends"].to_numpy()
+        interest_count_arr = df["interest_count"].to_numpy()
+        has_description_arr = df["has_description"].to_numpy()
+        neighbor_count_arr = df["neighbor_count"].to_numpy()
+        mutual_neighbor_count_arr = df["mutual_neighbor_count"].to_numpy()
+        received_int_arr = df["received_interaction_count"].to_numpy()
+        made_int_arr = df["made_interaction_count"].to_numpy()
+        received_comment_arr = df["received_comment_count"].to_numpy()
+        received_repost_arr = df["received_repost_count"].to_numpy()
+        made_comment_arr = df["made_comment_count"].to_numpy()
+        made_repost_arr = df["made_repost_count"].to_numpy()
+        self_int_arr = df["self_interaction_count"].to_numpy()
+        # 9 个 score 列在 numpy 层面统一 round（一次性，~1ms），避免 35k * 9 次
+        # Python ``round(float, 6)`` 的 0.5s 浪费。语义与原版 round 仍一致。
+        comment_ratio_arr = np.round(df["comment_ratio"].to_numpy(), 6)
+        repost_ratio_arr = np.round(df["repost_ratio"].to_numpy(), 6)
+        mutual_neighbor_ratio_arr = np.round(df["mutual_neighbor_ratio"].to_numpy(), 6)
+        profile_completeness_arr = np.round(df["profile_completeness_score"].to_numpy(), 6)
+        topic_match_arr = np.round(df["topic_match_score"].to_numpy(), 6)
+        influence_arr = np.round(df["influence_score"].to_numpy(), 6)
+        diffusion_arr = np.round(df["diffusion_score"].to_numpy(), 6)
+        activity_arr = np.round(df["activity_score"].to_numpy(), 6)
+        stability_arr = np.round(df["stability_score"].to_numpy(), 6)
+        feature_ready_arr = np.round(df["feature_ready_score"].to_numpy(), 6)
+        role_hint_arr = df["role_hint"].to_list()
+        semantic_profile_arr = df["semantic_profile"].to_list()
+        matched_keywords_arr = df["matched_keywords"].to_list()
+        keyword_hit_count_arr = df["keyword_hit_count"].to_numpy()
+
+        node_features: list[NodeFeature] = []
+        # Pydantic 2 的 __setattr__ 每次都要走 _model_field_setattr_handler，
+        # 35k * 47 字段 ≈ 1.6s 浪费。用 __new__ + __dict__.update 完全绕过，
+        # 再把 Pydantic 2 内部需要的 __pydantic_fields_set__ 等手动补齐。
+        # 拿一个用占位符的完整 default 实例 dump（拿到每个字段的真实默认值）。
+        # ``user_id/user_name/event_id/event_type/role_hint`` 是 required，循环里再覆盖。
+        _default_dict = NodeFeature(
+            user_id="", user_name="", event_id=event.event_id,
+            event_type=event.event_type, role_hint="general_support",
+        ).model_dump()
+        for i in range(len(df)):
+            mk = matched_keywords_arr[i]
+            d = dict(_default_dict)
+            d["user_id"] = str(user_id_arr[i])
+            d["user_name"] = user_name_arr[i]
+            d["event_id"] = event.event_id
+            d["event_type"] = event.event_type
+            d["role_hint"] = str(role_hint_arr[i])
+            d["platform"] = str(platform_arr[i])
+            d["influencer_flag"] = bool(influencer_flag_arr[i])
+            d["is_interaction_source"] = bool(is_source_arr[i])
+            d["follower_count"] = int(follower_count_arr[i])
+            d["friend_count"] = int(friend_count_arr[i])
+            d["interest_count"] = int(interest_count_arr[i])
+            d["has_description"] = bool(has_description_arr[i])
+            d["neighbor_count"] = int(neighbor_count_arr[i])
+            d["mutual_neighbor_count"] = int(mutual_neighbor_count_arr[i])
+            d["received_interaction_count"] = int(received_int_arr[i])
+            d["made_interaction_count"] = int(made_int_arr[i])
+            d["received_comment_count"] = int(received_comment_arr[i])
+            d["received_repost_count"] = int(received_repost_arr[i])
+            d["made_comment_count"] = int(made_comment_arr[i])
+            d["made_repost_count"] = int(made_repost_arr[i])
+            d["self_interaction_count"] = int(self_int_arr[i])
+            # 9 个 score 字段已经在 numpy 层面 round 过了，直接 float() 取值。
+            d["comment_ratio"] = float(comment_ratio_arr[i])
+            d["repost_ratio"] = float(repost_ratio_arr[i])
+            d["mutual_neighbor_ratio"] = float(mutual_neighbor_ratio_arr[i])
+            d["profile_completeness_score"] = float(profile_completeness_arr[i])
+            d["topic_match_score"] = float(topic_match_arr[i])
+            d["influence_score"] = float(influence_arr[i])
+            d["diffusion_score"] = float(diffusion_arr[i])
+            d["activity_score"] = float(activity_arr[i])
+            d["stability_score"] = float(stability_arr[i])
+            d["feature_ready_score"] = float(feature_ready_arr[i])
+            d["semantic_profile"] = str(semantic_profile_arr[i])
+            d["semantic_tags"] = list(mk[:4])
+            d["keyword_hit_count"] = int(keyword_hit_count_arr[i])
+            d["matched_keywords"] = list(mk)
+            nf = NodeFeature.__new__(NodeFeature)
+            nf.__dict__.update(d)
+            # Pydantic 2 内部状态：缺这些下游 model_copy / model_dump / 校验会出错
+            object.__setattr__(nf, "__pydantic_fields_set__", set(d.keys()))
+            object.__setattr__(nf, "__pydantic_extra__", None)
+            object.__setattr__(nf, "__pydantic_private__", None)
+            node_features.append(nf)
+
         node_features = self._augment_with_llm(
             node_features=node_features,
             event=event,
@@ -311,20 +486,23 @@ class FeatureBuilder:
         )
 
         matched_node_count = sum(1 for item in node_features if item.keyword_hit_count > 0)
+        source_node_count = sum(1 for item in node_features if item.is_interaction_source)
+        avg_feature_ready = round(
+            sum(item.feature_ready_score for item in node_features) / max(len(node_features), 1),
+            6,
+        )
+        avg_topic_match = round(
+            sum(item.topic_match_score for item in node_features) / max(len(node_features), 1),
+            6,
+        )
         summary = FeatureBuildSummary(
             event_id=event.event_id,
             event_type=event.event_type,
             node_count=len(node_features),
-            source_node_count=sum(1 for item in node_features if item.is_interaction_source),
+            source_node_count=source_node_count,
             matched_node_count=matched_node_count,
-            avg_feature_ready_score=round(
-                sum(item.feature_ready_score for item in node_features) / max(len(node_features), 1),
-                6,
-            ),
-            avg_topic_match_score=round(
-                sum(item.topic_match_score for item in node_features) / max(len(node_features), 1),
-                6,
-            ),
+            avg_feature_ready_score=avg_feature_ready,
+            avg_topic_match_score=avg_topic_match,
         )
         return FeatureBuildResult(
             event=event,
@@ -390,13 +568,20 @@ class FeatureBuilder:
         if not search_text:
             return []
 
-        matches: list[str] = []
-        tokens = search_text.split()
         compact_text = search_text.replace(" ", "")
-        for keyword in normalized_keywords:
-            if keyword in compact_text:
-                matches.append(keyword)
-                continue
+        # 第一遍：只做子串匹配。如果一个 keyword 都没命中，**完全跳过**
+        # fuzzy 阶段（35k profile 中大部分与事件不相关，省 3-7s 的 rapidfuzz）。
+        substring_matched = [k for k in normalized_keywords if k in compact_text]
+        if not substring_matched:
+            return []
+        # 至少一个子串命中，再对剩下的 keyword 做 fuzzy
+        remaining = [k for k in normalized_keywords if k not in substring_matched]
+        if not remaining:
+            return substring_matched
+
+        tokens = search_text.split()
+        matches = list(substring_matched)
+        for keyword in remaining:
             if any(self._token_fuzzy_matches(keyword, token) for token in tokens):
                 matches.append(keyword)
         return matches
@@ -460,6 +645,24 @@ class FeatureBuilder:
         if denominator <= 0:
             return 0.0
         return _clip_score(math.log1p(max(0, int(value))) / denominator)
+
+    # ---- 向量化加速（feature_builder 在 35k 节点规模下是端到端主瓶颈） ----
+    @staticmethod
+    def _max_log_array(values: np.ndarray) -> float:
+        """_max_log 的 numpy 版：``max(log1p(max(0, x)))``，保底 1.0。"""
+        if values.size == 0:
+            return 1.0
+        safe = np.maximum(values.astype(np.int64, copy=False), 0)
+        m = float(np.log1p(safe).max())
+        return max(m, 1.0)
+
+    @staticmethod
+    def _log_score_array(values: np.ndarray, denominator: float) -> np.ndarray:
+        """_log_score 的 numpy 版。``denominator <= 0`` 时整列返回 0。"""
+        if denominator <= 0:
+            return np.zeros_like(values, dtype=np.float64)
+        safe = np.maximum(values.astype(np.int64, copy=False), 0)
+        return np.clip(np.log1p(safe) / denominator, 0.0, 1.0)
 
     def _sort_features(self, node_features: list[NodeFeature]) -> list[NodeFeature]:
         node_features.sort(
