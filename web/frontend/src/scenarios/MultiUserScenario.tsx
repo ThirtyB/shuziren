@@ -2,7 +2,6 @@ import { useState } from "react";
 import { Loader2, Play } from "lucide-react";
 import type { RunStatus } from "../types";
 import { BaseOptionsForm } from "../components/BaseOptionsForm";
-import { postJson } from "../lib/api";
 import { errorMessage } from "../lib/options";
 import { SIMULATED_PLATFORMS } from "../lib/platforms";
 import { buildOptions, type SharedScenarioProps } from "./SingleTargetScenario";
@@ -23,10 +22,8 @@ export function MultiUserScenario(props: SharedScenarioProps) {
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
-    if (!eventPayload) {
-      onError("请先在上方选择或填写事件。");
-      return;
-    }
+    // 注意：``eventPayload === null`` 是合法的——``eventSource === "image"`` 时
+    // 由 ``props.submit`` 直接走 ``/api/runs/image`` + FormData，不需要事件 payload。
     if (!dispatchPlatform) {
       onError("多人协同分发必须指定一个分发平台。");
       return;
@@ -37,10 +34,7 @@ export function MultiUserScenario(props: SharedScenarioProps) {
         dispatch_mode: "multi_user",
         dispatch_platform: dispatchPlatform,
       });
-      const run = await postJson<RunStatus>("/api/runs/text", {
-        event: eventPayload,
-        options,
-      });
+      const run = await props.submit(eventPayload, options);
       onStart(run);
     } catch (err) {
       onError(errorMessage(err));

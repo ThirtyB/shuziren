@@ -31,15 +31,24 @@ export function SystemEventPicker({
   const [domains, setDomains] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [notice, setNotice] = useState("");
+  // 翻页：每页 50 条；切换 query / domain 时由下方 useEffect 自动回到第 0 页。
+  const [page, setPage] = useState(0);
+  const pageSize = 50;
 
   const params = useMemo(
     () => ({
-      limit: 50,
+      limit: pageSize,
+      offset: page * pageSize,
       q: query.trim() || undefined,
       domain: domain || undefined,
     }),
-    [query, domain],
+    [query, domain, page],
   );
+
+  // 切搜索词 / 领域时回到第 0 页，避免停留在一个超出 total 的高页码。
+  useEffect(() => {
+    setPage(0);
+  }, [query, domain]);
 
   useEffect(() => {
     let cancelled = false;
@@ -71,7 +80,12 @@ export function SystemEventPicker({
       <div className="picker-head">
         <h3>系统事件库</h3>
         <span className="picker-count">
-          {loading ? "加载中" : `共 ${total} 条，当前显示 ${items.length} 条`}
+          {loading
+            ? "加载中"
+            : `第 ${total === 0 ? 0 : page * pageSize + 1} - ${Math.min(
+                (page + 1) * pageSize,
+                total,
+              )} 条 / 共 ${total} 条`}
         </span>
       </div>
       <div className="picker-controls">
@@ -133,6 +147,27 @@ export function SystemEventPicker({
               <p>{item.event_summary}</p>
             </button>
           ))}
+        </div>
+      )}
+      {!loading && total > 0 && (
+        <div className="picker-pagination">
+          <button
+            type="button"
+            disabled={page === 0}
+            onClick={() => setPage((p) => Math.max(0, p - 1))}
+          >
+            上一页
+          </button>
+          <span className="picker-page-indicator">
+            第 {page + 1} / {Math.max(1, Math.ceil(total / pageSize))} 页
+          </span>
+          <button
+            type="button"
+            disabled={(page + 1) * pageSize >= total}
+            onClick={() => setPage((p) => p + 1)}
+          >
+            下一页
+          </button>
         </div>
       )}
     </div>

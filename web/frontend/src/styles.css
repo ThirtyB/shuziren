@@ -1064,6 +1064,39 @@ details pre {
   box-shadow: 0 0 0 1px #0f766e inset;
 }
 
+.picker-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 6px 10px;
+  border: 1px solid #d8e0e7;
+  border-radius: 8px;
+  background: #fbfcfd;
+  font-size: 12px;
+  color: #617080;
+  flex-wrap: wrap;
+}
+
+.picker-pagination button {
+  min-height: 28px;
+  padding: 4px 12px;
+  font-size: 12px;
+  border-radius: 6px;
+}
+
+.picker-pagination button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.picker-pagination .picker-page-indicator {
+  font-family: Consolas, "SFMono-Regular", monospace;
+  color: #0f5f59;
+  font-weight: 600;
+}
+
 .event-list-head {
   display: flex;
   align-items: center;
@@ -1277,4 +1310,118 @@ details pre {
 
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+/* === 多模态图像事件输入 === */
+.image-event-input {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.image-event-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  gap: 12px;
+  align-items: stretch;
+}
+
+.image-event-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px dashed #9ab0bf;
+  border-radius: 8px;
+  padding: 12px;
+  background: #f8fafc;
+}
+
+.image-event-hint {
+  margin: 0;
+  color: #617080;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.image-event-preview {
+  position: relative;
+  border: 1px solid #d8e0e7;
+  border-radius: 8px;
+  background: #edf2f7;
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.image-event-preview img {
+  flex: 1;
+  width: 100%;
+  height: auto;
+  max-height: 240px;
+  object-fit: contain;
+  background: #ffffff;
+}
+
+.image-event-placeholder {
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.image-event-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-top: 1px solid #e5ebf0;
+  background: #ffffff;
+  font-size: 12px;
+  color: #465767;
+  flex-wrap: wrap;
+}
+
+.image-event-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: Consolas, "SFMono-Regular", monospace;
+  color: #0f766e;
+  overflow-wrap: anywhere;
+}
+
+.image-event-size {
+  color: #617080;
+}
+
+.image-event-clear {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid #cdd7df;
+  background: #ffffff;
+  color: #b91c1c;
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
+.image-event-clear:hover {
+  background: #fef2f2;
+}
+
+/* === 多模态"用户/系统/图片"三栏事件来源切换器 === */
+.segmented.segmented-three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  width: 280px;
+}
+
+.segmented.segmented-three button {
+  font-size: 12px;
+  white-space: nowrap;
 }

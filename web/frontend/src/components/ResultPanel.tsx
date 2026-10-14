@@ -220,6 +220,13 @@ function FiveDimension({ payload }: { payload: Record<string, unknown> }) {
  * 数据来自 ``五维调度策略.平台.跨平台总览``——与多人分发共用同一套输出结构，
  * 不再读取第二份顶层块。
  */
+/**
+ * 跨平台分发总览：人数 / 缺口 / 安全等级 / 重复数字人。
+ *
+ * 数据来自 ``五维调度策略.平台.跨平台总览``。渲染策略仿照多人分发的"目标对象"段：
+ * 只保留结构化数据（摘要带 + id-row），跨平台提示 / 草案说明 / 范围说明等元
+ * 信息从 UI 移除——这些字段仍保留在后端 payload 中，便于后续按需取回。
+ */
 function CrossPlatformOverview({ payload }: { payload: Record<string, unknown> }) {
   const strategy = payload["五维调度策略"] as Record<string, unknown> | undefined;
   const platform = strategy?.["平台"] as Record<string, unknown> | undefined;
@@ -228,9 +235,6 @@ function CrossPlatformOverview({ payload }: { payload: Record<string, unknown> }
   const tiers =
     (overview["安全等级分布"] as Record<string, unknown> | undefined) ?? {};
   const overlaps = (overview["跨平台重复数字人"] as string[] | undefined) ?? [];
-  const warnings = (overview["跨平台提示"] as string[] | undefined) ?? [];
-  const draftNote = String(overview["内容草案说明"] ?? "");
-  const scopeNote = String(overview["结果范围说明"] ?? "");
 
   return (
     <section className="result-section highlight">
@@ -274,24 +278,19 @@ function CrossPlatformOverview({ payload }: { payload: Record<string, unknown> }
           </div>
         </>
       )}
-      {warnings.length > 0 && (
-        <ul className="warning-list">
-          {warnings.map((item, index) => (
-            <li key={index}>{item}</li>
-          ))}
-        </ul>
-      )}
-      {draftNote && <p>{draftNote}</p>}
-      {scopeNote && <p>{scopeNote}</p>}
     </section>
   );
 }
 
 /**
- * 单个平台的分发方案：人数概览 + 选人明细 + 内容计划 + 时间计划 + 平台提示。
+ * 单个平台的分发方案：人数概览 + 选人明细 + 内容计划 + 时间计划。
  *
  * 数据来自 ``五维调度策略.平台.各平台方案[i]``：与多人分发共用同一套五维输出，
- * 跨平台只是多出这一块平台专属明细，字段名与后端一一对应。
+ * 跨平台只是多出这一块平台专属明细。
+ *
+ * 显示策略仿照多人分发的"五维调度策略"：只保留结构化数据（DataTable + 摘要带 +
+ * id-row），风险/护栏/免责/节奏建议等提示性文字已从 UI 移除——这些字段仍保留在
+ * 后端 payload 中，便于后续按需取回。
  */
 function PlatformSchemeCard({
   scheme,
@@ -304,19 +303,14 @@ function PlatformSchemeCard({
   const selectedIds = (scheme["选取数字人id组"] as string[] | undefined) ?? [];
   const tiers = (scheme["安全等级分布"] as Record<string, unknown> | undefined) ?? {};
 
-  const roleRows =
-    (scheme["数字人平台角色"] as Array<Record<string, unknown>> | undefined) ?? [];
-  const contentModes = (scheme["内容形态"] as string[] | undefined) ?? [];
+  // 完整的逐节点选人与评分明细（可追溯依据），后端 _build_platform_schemes
+  // 会以"选取节点明细"列出每个被选数字人的全部评分维度。
+  const nodeDetailRows =
+    (scheme["选取节点明细"] as Array<Record<string, unknown>> | undefined) ?? [];
   const guidanceRows =
     (scheme["写作指引"] as Array<Record<string, unknown>> | undefined) ?? [];
-  const guardrails = (scheme["内容护栏"] as string[] | undefined) ?? [];
   const stageRows =
     (scheme["时间阶段"] as Array<Record<string, unknown>> | undefined) ?? [];
-  const cadenceNotes = (scheme["节奏建议"] as string[] | undefined) ?? [];
-  const stageNote = String(scheme["阶段说明"] ?? "");
-  const warnings = (scheme["平台提示"] as string[] | undefined) ?? [];
-  const fitLimitations = (scheme["适配限制"] as string[] | undefined) ?? [];
-  const policyDisclaimer = String(scheme["免责声明"] ?? "");
 
   return (
     <div className="sub-section">
@@ -355,64 +349,18 @@ function PlatformSchemeCard({
               <span key={id}>{id}</span>
             ))}
           </div>
-          <DataTable items={roleRows} />
+          <DataTable items={nodeDetailRows} />
         </div>
 
         <div className="sub-section">
           <h3>内容计划</h3>
-          {contentModes.length > 0 && (
-            <div className="id-row">
-              {contentModes.map((mode) => (
-                <span key={mode}>{mode}</span>
-              ))}
-            </div>
-          )}
           <DataTable items={guidanceRows} />
-          {guardrails.length > 0 && (
-            <>
-              <h3>内容护栏</h3>
-              <ul className="warning-list">
-                {guardrails.map((item, guardIndex) => (
-                  <li key={guardIndex}>{item}</li>
-                ))}
-              </ul>
-            </>
-          )}
         </div>
 
         <div className="sub-section">
           <h3>时间计划</h3>
           <DataTable items={stageRows} />
-          {cadenceNotes.length > 0 && (
-            <ul className="warning-list">
-              {cadenceNotes.map((item, noteIndex) => (
-                <li key={noteIndex}>{item}</li>
-              ))}
-            </ul>
-          )}
-          {stageNote && <p>{stageNote}</p>}
         </div>
-
-        {(warnings.length > 0 || fitLimitations.length > 0 || policyDisclaimer) && (
-          <div className="sub-section">
-            <h3>风险与适配说明</h3>
-            {warnings.length > 0 && (
-              <ul className="warning-list">
-                {warnings.map((item, warningIndex) => (
-                  <li key={warningIndex}>{item}</li>
-                ))}
-              </ul>
-            )}
-            {fitLimitations.length > 0 && (
-              <ul className="warning-list">
-                {fitLimitations.map((item, limitIndex) => (
-                  <li key={limitIndex}>{item}</li>
-                ))}
-              </ul>
-            )}
-            {policyDisclaimer && <p>{policyDisclaimer}</p>}
-          </div>
-        )}
       </div>
     </div>
   );

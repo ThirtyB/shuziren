@@ -4,11 +4,12 @@ import type {
   DispatchMode,
   EventForm,
   EventSource,
+  RunOptions,
   RunStatus,
   SystemEventSummary,
 } from "../types";
 import { SCENARIO_TABS } from "../types";
-import { fetchJson, getSystemEvent } from "../lib/api";
+import { fetchJson, getSystemEvent, postJson, runImageEvent } from "../lib/api";
 import { errorMessage } from "../lib/options";
 import { DEFAULT_ALLOWED_PLATFORMS } from "../lib/platforms";
 import { eventToForm, FALLBACK_EVENT } from "../lib/eventForm";
@@ -17,6 +18,7 @@ import { StatusPanel } from "../components/StatusPanel";
 import { ResultPanel } from "../components/ResultPanel";
 import { UserEventForm, getUserEventPayload } from "../components/UserEventForm";
 import { SystemEventPicker } from "../components/SystemEventPicker";
+import { ImageEventForm } from "../components/ImageEventForm";
 import { SingleTargetScenario } from "../scenarios/SingleTargetScenario";
 import { MultiUserScenario } from "../scenarios/MultiUserScenario";
 import { CrossPlatformScenario } from "../scenarios/CrossPlatformScenario";
@@ -57,10 +59,12 @@ export default function ConsoleRoute() {
   // 事件来源
   const [eventSource, setEventSource] = useState<EventSource>("user");
   useEffect(() => {
-    // 切源时清掉与上次系统事件选择相关的局部态（避免 picker 残留高亮），
-    // 但不要清 run / detail / trace，否则正在跑的 run 也会被一并隐藏。
+    // 切源时清掉与上次系统事件/图像输入相关的局部态（避免 picker 残留高亮、
+    // 上一次的 File 对象继续生效），但不要清 run / detail / trace，否则
+    // 正在跑的 run 也会被一并隐藏。
     setSelectedEventId("");
     setSystemEvent(null);
+    setImageFile(null);
   }, [eventSource]);
 
   // 用户事件表单状态
@@ -71,6 +75,10 @@ export default function ConsoleRoute() {
   // 系统事件
   const [systemEvent, setSystemEvent] = useState<SystemEventSummary | null>(null);
   const [systemPayload, setSystemPayload] = useState<Record<string, unknown> | null>(null);
+
+  // 多模态图像事件：仅在 eventSource === "image" 时使用；切源时清空，
+  // 避免上一次的 File 对象继续在闭包里"有效"，造成"看起来没选图却能跑"的假象。
+  const [imageFile, setImageFile] = useState<File | null>(null);
 
   // 运行态
   const [run, setRun] = useState<RunStatus | null>(null);
@@ -180,6 +188,28 @@ export default function ConsoleRoute() {
     setActiveRunId(status.run_id);
     setLatestRunId(status.run_id);
     setRefreshTick((value) => value + 1);
+  }
+
+  /**
+   * 提交 run 的统一入口：按事件来源分流到 ``/api/runs/text`` 或
+   * ``/api/runs/image``。Scenario 内部不感知具体实现，事件来源
+   * （``eventSource``）是这一层唯一的判别字段，因此该函数通过
+   * 闭包捕获最新的 ``eventSource`` / ``imageFile``。
+   */
+  async function runViaSource(
+    event: Record<string, unknown> | null,
+    options: RunOptions,
+  ): Promise<RunStatus> {
+    if (eventSource === "image") {
+      if (!imageFile) {
+        throw new Error("请先在'图片输入'区域选择一张图片。");
+      }
+      return runImageEvent(imageFile, options);
+    }
+    if (!event) {
+      throw new Error("请先在上方选择或填写事件。");
+    }
+    return postJson<RunStatus>("/api/runs/text", { event, options });
   }
 
   // 根据 activeRunId 拉取完整 run status（包含 results / errors）。
@@ -305,6 +335,7 @@ export default function ConsoleRoute() {
     setAllowedPlatforms,
     useLlm,
     isRunning,
+    submit: runViaSource,
     onStart: handleStart,
     onError: setNotice,
   };
@@ -342,7 +373,7 @@ export default function ConsoleRoute() {
           <div className="sub-section">
             <div className="sub-section-head">
               <h3>事件来源</h3>
-              <div className="segmented">
+              <div className="segmented segmented-three">
                 <button
                   type="button"
                   className={eventSource === "user" ? "active" : ""}
@@ -357,6 +388,13 @@ export default function ConsoleRoute() {
                 >
                   系统事件
                 </button>
+                <button
+                  type="button"
+                  className={eventSource === "image" ? "active" : ""}
+                  onClick={() => setEventSource("image")}
+                >
+                  图片输入
+                </button>
               </div>
             </div>
             {eventSource === "user" ? (
@@ -368,12 +406,14 @@ export default function ConsoleRoute() {
                 inputMode={inputMode}
                 onInputModeChange={setInputMode}
               />
-            ) : (
+            ) : eventSource === "system" ? (
               <SystemEventPicker
                 selectedEventId={systemEvent?.event_id ?? ""}
                 onSelect={pickSystemEvent}
                 onError={setNotice}
               />
+            ) : (
+              <ImageEventForm onFileChange={setImageFile} />
             )}
           </div>
 

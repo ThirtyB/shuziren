@@ -26,6 +26,7 @@ from .selector import (
     DEFAULT_SELECTED_ROLE,
     ROLE_HINT_TO_DISPATCH_STAGE,
     ROLE_HINT_TO_SELECTED_ROLE,
+    rebalance_selected_roles,
 )
 from .strategy_generator import StrategyGenerator
 
@@ -785,12 +786,16 @@ def build_multiplatform_output(
         ),
     )
 
+    # 节点角色以 rebalance 后的 selected_role 为准：跨平台选人时 source_role_hint
+    # 来自 PlatformDispatcher._rank_candidates，不保证每平台都有 core_publish_node。
+    # _selected_nodes_from_dispatch 已经按平台做过角色再平衡（见
+    # rebalance_selected_roles），这里输出的"节点角色"必须跟动作清单里实际使用的
+    # 角色保持一致，避免 UI 看到 amplification 但动作像 core 的割裂感。
+    selected_node_by_id = {node.user_id: node for node in selected_nodes}
     platform_item_fields = {
         item.user_id: {
             "平台角色": item.platform_role,
-            "节点角色": ROLE_HINT_TO_SELECTED_ROLE.get(
-                item.source_role_hint, DEFAULT_SELECTED_ROLE
-            ),
+            "节点角色": selected_node_by_id[item.user_id].selected_role,
             "选取名次": item.selection_rank,
             "安全等级": item.safety_tier,
             "平台适配分": item.platform_fit_score,
@@ -840,12 +845,21 @@ def _selected_nodes_from_dispatch(
     （阶段 / 频率 / 内容风格）。这里按 ``source_role_hint`` 恢复角色与阶段，再交给
     ``StrategyGenerator`` 用**同一个策略上下文**补齐其余字段，使跨平台输出的动作
     清单与多人分发逐字段同源，而不是各推一套。
+
+    按平台分别做角色再平衡（``rebalance_selected_roles``），保证每个平台至少有一
+    个 ``core_publish_node``。否则下游 ``_coordination_target_id`` /
+    ``_interaction_target`` 找不到协同目标，整张动作清单会退化成"自发自评"——
+    多人分发的 ``Selector`` 路径自带这个再平衡，跨平台分发的
+    ``PlatformDispatcher`` 路径没有，这里手动补齐。
     """
 
     node_score_by_id = {node.user_id: node for node in score_result.node_scores}
     generator = StrategyGenerator()
     plans: list[StrategyNodePlan] = []
     for platform_result in dispatch_result.platforms:
+        # Step 1：把该平台内选中的 assignment 转成 SelectedNode，保留 source_role_hint
+        # 推导出的初始 selected_role。
+        platform_selections: list[SelectedNode] = []
         for assignment in platform_result.selected_nodes:
             base = node_score_by_id.get(assignment.user_id)
             if base is None:
@@ -856,20 +870,29 @@ def _selected_nodes_from_dispatch(
                     "无法复用多人分发的节点规划逻辑。"
                 )
             role_hint = assignment.source_role_hint or base.role_hint
-            selected_node = SelectedNode(
-                **base.model_dump(),
-                selection_rank=assignment.selection_rank,
-                selected_role=ROLE_HINT_TO_SELECTED_ROLE.get(
-                    role_hint, DEFAULT_SELECTED_ROLE
-                ),
-                dispatch_stage=ROLE_HINT_TO_DISPATCH_STAGE.get(
-                    role_hint, DEFAULT_DISPATCH_STAGE
-                ),
-                dispatch_priority=PRIORITY_TIER_TO_DISPATCH_PRIORITY.get(
-                    str(getattr(base, "priority_tier", "") or ""), "p3"
-                ),
-                selection_bucket="primary",
+            platform_selections.append(
+                SelectedNode(
+                    **base.model_dump(),
+                    selection_rank=assignment.selection_rank,
+                    selected_role=ROLE_HINT_TO_SELECTED_ROLE.get(
+                        role_hint, DEFAULT_SELECTED_ROLE
+                    ),
+                    dispatch_stage=ROLE_HINT_TO_DISPATCH_STAGE.get(
+                        role_hint, DEFAULT_DISPATCH_STAGE
+                    ),
+                    dispatch_priority=PRIORITY_TIER_TO_DISPATCH_PRIORITY.get(
+                        str(getattr(base, "priority_tier", "") or ""), "p3"
+                    ),
+                    selection_bucket="primary",
+                )
             )
+        # Step 2：per-platform 角色再平衡。多人分发走的是
+        # ``Selector._rebalance_selected_roles``，跨平台分发走的是
+        # ``PlatformDispatcher``，没有内置这个保障；这里手动补齐，避免
+        # amplification/support 全部聚集在同一平台导致动作生成阶段全部"自指"。
+        rebalanced_selections = rebalance_selected_roles(platform_selections)
+        # Step 3：由 ``StrategyGenerator`` 用同一套策略上下文补齐阶段/频率/内容风格。
+        for selected_node in rebalanced_selections:
             plans.append(
                 generator.build_node_plan_from_strategy(
                     node=selected_node,
@@ -1277,7 +1300,11 @@ def _build_five_dimension_strategy(
         node_output = node_outputs.get(node_key, {})
         post_ref = post_refs.get(node.user_id, "")
         node_actions = node_output.get("动作清单", [])
-        selected_actions = _minimal_actions_for_node(node_actions, max_actions=2)
+        # 至少保留 content_publish + audience_interaction + digital_human_coordination
+        # 三组。``digital_human_coordination`` 是数字人之间的真正协同（点赞/评论/转发
+        # 其他人的帖子），原先 ``max_actions=2`` 把它和 ``comment_monitoring`` 一起
+        # 砍掉了，导致整张动作清单看起来都是"自发自评"。
+        selected_actions = _minimal_actions_for_node(node_actions, max_actions=3)
 
         target_plan.append(
             {

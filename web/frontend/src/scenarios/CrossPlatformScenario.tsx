@@ -2,7 +2,6 @@ import { useState } from "react";
 import { Loader2, Play, Plus, Trash2 } from "lucide-react";
 import type { PlatformSpecPayload, RunStatus } from "../types";
 import { BaseOptionsForm } from "../components/BaseOptionsForm";
-import { postJson } from "../lib/api";
 import { errorMessage } from "../lib/options";
 import { SIMULATED_PLATFORMS } from "../lib/platforms";
 import { buildOptions, type SharedScenarioProps } from "./SingleTargetScenario";
@@ -37,10 +36,8 @@ export function CrossPlatformScenario(props: SharedScenarioProps) {
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
-    if (!eventPayload) {
-      onError("请先在上方选择或填写事件。");
-      return;
-    }
+    // 注意：``eventPayload === null`` 是合法的——``eventSource === "image"`` 时
+    // 由 ``props.submit`` 直接走 ``/api/runs/image`` + FormData，不需要事件 payload。
     const cleaned: PlatformSpecPayload[] = specs
       .map((item) => ({ ...item, requested_count: Number(item.requested_count) || 0 }))
       .filter((item) => item.requested_count > 0);
@@ -62,10 +59,7 @@ export function CrossPlatformScenario(props: SharedScenarioProps) {
         dispatch_mode: "cross_platform",
         platform_specs: cleaned,
       });
-      const run = await postJson<RunStatus>("/api/runs/text", {
-        event: eventPayload,
-        options,
-      });
+      const run = await props.submit(eventPayload, options);
       onStart(run);
     } catch (err) {
       onError(errorMessage(err));

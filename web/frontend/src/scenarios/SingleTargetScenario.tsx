@@ -2,7 +2,6 @@ import { useState } from "react";
 import { Loader2, Play } from "lucide-react";
 import type { RunOptions, RunStatus } from "../types";
 import { BaseOptionsForm } from "../components/BaseOptionsForm";
-import { postJson } from "../lib/api";
 import { errorMessage } from "../lib/options";
 import { SIMULATED_PLATFORMS } from "../lib/platforms";
 
@@ -30,6 +29,14 @@ export type SharedScenarioProps = {
   setAllowedPlatforms: (value: string) => void;
   useLlm: boolean;
   isRunning: boolean;
+  /**
+   * 提交运行：由父组件 ``ConsoleRoute`` 提供，分流到对应的后端端点。
+   *  - ``eventSource="user"|"system"`` 时，``event`` 是表单/系统事件 payload；
+   *  - ``eventSource="image"`` 时，``event`` 可以是 null，run 会改为
+   *    POST ``/api/runs/image`` + FormData（``submit`` 内部用闭包捕获 imageFile）。
+   * Scenario 不感知事件来源的具体实现。
+   */
+  submit: (event: Record<string, unknown> | null, options: RunOptions) => Promise<RunStatus>;
   onStart: (run: RunStatus) => void;
   onError: (message: string) => void;
 };
@@ -50,10 +57,10 @@ export function SingleTargetScenario(props: SingleTargetScenarioProps) {
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
-    if (!eventPayload) {
-      onError("请先在上方选择或填写事件。");
-      return;
-    }
+    // 注意：``eventPayload === null`` 是合法的——``eventSource === "image"`` 时
+    // 由 ``props.submit`` 直接走 ``/api/runs/image`` + FormData，不需要事件 payload。
+    // 这里不再做"必须有 event"的短路校验，统一由 ``ConsoleRoute`` 的 runViaSource
+    // 按事件来源分流校验。
     if (!targetUserId.trim()) {
       onError("单人定向分发必须填写目标数字人 user_id。");
       return;
@@ -64,10 +71,7 @@ export function SingleTargetScenario(props: SingleTargetScenarioProps) {
         dispatch_mode: "single_target",
         target_user_id: targetUserId.trim(),
       });
-      const run = await postJson<RunStatus>("/api/runs/text", {
-        event: eventPayload,
-        options,
-      });
+      const run = await props.submit(eventPayload, options);
       onStart(run);
     } catch (err) {
       onError(errorMessage(err));

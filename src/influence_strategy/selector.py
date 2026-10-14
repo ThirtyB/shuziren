@@ -50,6 +50,69 @@ DEFAULT_ROLE_HINT = "general_support"
 DEFAULT_DISPATCH_STAGE = "stage_2_support"
 
 
+def rebalance_selected_roles(
+    selected_nodes: list[SelectedNode],
+) -> list[SelectedNode]:
+    """保证多人/跨平台选出的节点里有合理的角色分布。
+
+    规则：核心发布节点必须存在；角色种类至少 ``min(3, 人数)``。
+    不足时按 ``core_publish_node → interaction_response_node → amplification_node →
+    support_node`` 的顺序补齐，最后一段回退到 ``interaction_response_node``，避免
+    同一个平台的若干人全是 amplification 之类、让所有互动动作都退化成"自指"。
+
+    原本只有 :meth:`Selector._rebalance_selected_roles` 在多人分发里调用，
+    跨平台分发（``PlatformDispatcher``）走的是另一条选人路径，没有这个保障——
+    结果就是核心发布节点缺失、动作生成阶段找不到协同目标，整张清单退化成
+    "自发自评"。提取为模块级函数就是让两条路径共用同一份角色再平衡逻辑。
+    """
+    if len(selected_nodes) <= 1:
+        return selected_nodes
+    existing_roles = [node.selected_role for node in selected_nodes]
+    required_unique_roles = min(3, len(selected_nodes))
+    needs_rebalance = (
+        "core_publish_node" not in existing_roles
+        or len(set(existing_roles)) < required_unique_roles
+    )
+    if not needs_rebalance:
+        return selected_nodes
+
+    desired_roles = [
+        "core_publish_node",
+        "interaction_response_node",
+        "amplification_node",
+        "support_node",
+        "interaction_response_node",
+    ]
+    rebalanced: list[SelectedNode] = []
+    for index, node in enumerate(selected_nodes):
+        selected_role = desired_roles[min(index, len(desired_roles) - 1)]
+        role_hint = SELECTED_ROLE_TO_ROLE_HINT.get(selected_role, DEFAULT_ROLE_HINT)
+        reasons = [
+            reason
+            for reason in node.selection_reasons
+            if not reason.startswith("selected_role=")
+            and not reason.startswith("dispatch_stage=")
+        ]
+        if selected_role != node.selected_role:
+            reasons.append(f"role_rebalanced={node.selected_role}->{selected_role}")
+        reasons.append(f"selected_role={selected_role}")
+        reasons.append(
+            f"dispatch_stage={ROLE_HINT_TO_DISPATCH_STAGE.get(role_hint, DEFAULT_DISPATCH_STAGE)}"
+        )
+        rebalanced.append(
+            node.model_copy(
+                update={
+                    "selected_role": selected_role,
+                    "dispatch_stage": ROLE_HINT_TO_DISPATCH_STAGE.get(
+                        role_hint, DEFAULT_DISPATCH_STAGE
+                    ),
+                    "selection_reasons": reasons,
+                }
+            )
+        )
+    return rebalanced
+
+
 class Selector:
     def select(
         self,
@@ -392,47 +455,7 @@ class Selector:
         return ROLE_HINT_TO_SELECTED_ROLE.get(role_hint, DEFAULT_SELECTED_ROLE)
 
     def _rebalance_selected_roles(self, selected_nodes: list[SelectedNode]) -> list[SelectedNode]:
-        if len(selected_nodes) <= 1:
-            return selected_nodes
-        existing_roles = [node.selected_role for node in selected_nodes]
-        required_unique_roles = min(3, len(selected_nodes))
-        needs_rebalance = (
-            "core_publish_node" not in existing_roles
-            or len(set(existing_roles)) < required_unique_roles
-        )
-        if not needs_rebalance:
-            return selected_nodes
-
-        desired_roles = [
-            "core_publish_node",
-            "interaction_response_node",
-            "amplification_node",
-            "support_node",
-            "interaction_response_node",
-        ]
-        rebalanced: list[SelectedNode] = []
-        for index, node in enumerate(selected_nodes):
-            selected_role = desired_roles[min(index, len(desired_roles) - 1)]
-            role_hint = self._role_hint_for_selected_role(selected_role)
-            reasons = [
-                reason
-                for reason in node.selection_reasons
-                if not reason.startswith("selected_role=") and not reason.startswith("dispatch_stage=")
-            ]
-            if selected_role != node.selected_role:
-                reasons.append(f"role_rebalanced={node.selected_role}->{selected_role}")
-            reasons.append(f"selected_role={selected_role}")
-            reasons.append(f"dispatch_stage={self._dispatch_stage(role_hint)}")
-            rebalanced.append(
-                node.model_copy(
-                    update={
-                        "selected_role": selected_role,
-                        "dispatch_stage": self._dispatch_stage(role_hint),
-                        "selection_reasons": reasons,
-                    }
-                )
-            )
-        return rebalanced
+        return rebalance_selected_roles(selected_nodes)
 
     def _role_hint_for_selected_role(self, selected_role: str) -> str:
         return SELECTED_ROLE_TO_ROLE_HINT.get(selected_role, DEFAULT_ROLE_HINT)

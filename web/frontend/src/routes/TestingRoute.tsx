@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import type { RunStatus } from "../types";
-import { fetchJson, type RunHistoryEntry } from "../lib/api";
+import type { RunOptions, RunStatus } from "../types";
+import { fetchJson, postJson, type RunHistoryEntry } from "../lib/api";
 import { errorMessage } from "../lib/options";
 import { DEFAULT_ALLOWED_PLATFORMS } from "../lib/platforms";
 import { Topbar } from "../components/Topbar";
@@ -140,6 +140,18 @@ export default function TestingRoute() {
   // BatchEvalScenario 不需要 eventPayload（后端走 default_events_path）。
   // 为了让 SharedScenarioProps 类型对齐，这里传 null 是安全的：
   // buildOptions 不读 eventPayload；BatchEvalScenario.handleSubmit 也不会去 getPayload。
+  /**
+   * 批量评测走的是 ``/api/eval-runs``（后端从 ``default_events_path`` 读 200 条
+   * hot_event 跑），不需要 event payload，因此 ``event`` 参数被忽略。
+   * Scenario 只负责组装 options，真正提交由 ``sharedScenarioProps.submit`` 统一入口。
+   */
+  async function submitEvalRun(
+    _event: Record<string, unknown> | null,
+    options: RunOptions,
+  ): Promise<RunStatus> {
+    return postJson<RunStatus>("/api/eval-runs", { options });
+  }
+
   const sharedScenarioProps = {
     eventPayload: null as Record<string, unknown> | null,
     profileLimit,
@@ -156,6 +168,7 @@ export default function TestingRoute() {
     setAllowedPlatforms,
     useLlm,
     isRunning,
+    submit: submitEvalRun,
     onStart: handleStart,
     onError: setNotice,
   };
