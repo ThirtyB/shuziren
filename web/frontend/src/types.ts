@@ -125,3 +125,94 @@ export type RunOptions = {
   event_limit?: number | null;
   event_id?: string | null;
 };
+
+/** 压测任务的执行状态：与后端 benchmark.json 的 ``state`` 对齐。 */
+export type BenchmarkState = "queued" | "running" | "completed" | "failed";
+
+/** 压测里单个测试点（一轮）使用的事件；一次测试内每个测试点事件都不同。 */
+export type BenchmarkEventEntry = {
+  iteration?: number;
+  event_id: string;
+  event_title?: string | null;
+  domain?: string | null;
+};
+
+/** 后端压测 /api/benchmarks 的耗时数据形状，前端只读这一份做柱状图与明细展示。 */
+export type BenchmarkStageTimes = Record<string, number>;
+
+/** 压测请求体：与后端 ``BenchmarkRequest`` 对齐。 */
+export type BenchmarkRequest = {
+  options: RunOptions;
+  iterations?: number;
+  event_id?: string | null;
+  label?: string | null;
+};
+
+export type BenchmarkRun = {
+  iteration: number;
+  run_id: string;
+  ok: boolean;
+  error?: string;
+  elapsed_seconds: number;
+  stage_times: BenchmarkStageTimes;
+  /** 本轮随机抽到的事件（异步压测里每轮都不一样）。 */
+  event?: BenchmarkEventEntry | null;
+  summary: RunResult | null;
+};
+
+export type BenchmarkSummary = {
+  iterations: number;
+  successful_iterations: number;
+  failed_iterations: number;
+  total_seconds: number;
+  average_seconds: number;
+  min_seconds: number;
+  max_seconds: number;
+  stage_averages: Record<string, number>;
+  stage_min_max: Record<string, { min: number; max: number; samples: number[] }>;
+  per_iteration: Array<{ iteration: number; seconds: number }>;
+};
+
+/** 单条压测的完整状态：``POST`` 立即返回 queued，前端凭 benchmark_id 轮询。 */
+export type BenchmarkResponse = {
+  benchmark_id: string;
+  label: string | null;
+  state: BenchmarkState;
+  iterations: number;
+  completed: number;
+  failed: number;
+  successful_iterations: number;
+  failed_iterations: number;
+  options: RunOptions;
+  /** 每个测试点用的事件（随着轮次推进逐步追加）。 */
+  events: BenchmarkEventEntry[];
+  runs: BenchmarkRun[];
+  /** 刚开始跑时为 null；至少成功一轮后才有汇总数据。 */
+  summary: BenchmarkSummary | null;
+  output_dir: string;
+  created_at: string;
+  updated_at: string;
+  error: string | null;
+};
+
+/** 测试历史列表条目：``GET /api/benchmarks`` 返回的轻量结构。 */
+export type BenchmarkHistoryItem = {
+  benchmark_id: string;
+  label: string | null;
+  state: BenchmarkState;
+  iterations: number;
+  completed: number;
+  failed: number;
+  successful_iterations: number;
+  failed_iterations: number;
+  use_llm: boolean;
+  dispatch_mode: DispatchMode;
+  event_count: number;
+  events: BenchmarkEventEntry[];
+  created_at: string;
+  updated_at: string;
+  total_seconds: number | null;
+  average_seconds: number | null;
+  output_dir: string;
+  error: string | null;
+};

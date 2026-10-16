@@ -72,3 +72,8 @@ eval/output/
 eval/.cache/
 *.pyc
 .ipynb_checkpoints/
+
+# 临时诊断/分析脚本的运行产物（脚本本体为 _*.py，产物目录形如 _xxx_out/、_xxx_after/）。
+# 它们是一次性排查用的，用完即删；加在这里是为了不让它们污染 git status。
+/_*_out/
+/_*_after/

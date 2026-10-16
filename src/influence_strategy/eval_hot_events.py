@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -434,7 +435,7 @@ def run_hot_event_evaluation(
         output_dir=output_dir,
         trace_dir=trace_dir,
     )
-    return _run_hot_event_evaluation(
+    output_path, output_payload, _stage_times = _run_hot_event_evaluation(
         workspace_root=workspace_root,
         output_dir=run_dirs.output_dir,
         hot_event=hot_event,
@@ -449,6 +450,7 @@ def run_hot_event_evaluation(
         trace_dir=run_dirs.trace_dir,
         dispatch_platform=dispatch_platform,
     )
+    return output_path, output_payload
 
 
 def run_hot_event_evaluations(
@@ -485,7 +487,7 @@ def run_hot_event_evaluations(
 
     results: list[tuple[Path, dict[str, Any]]] = []
     for hot_event in selected_events:
-        output_path, output_payload = _run_hot_event_evaluation(
+        output_path, output_payload, _stage_times = _run_hot_event_evaluation(
             workspace_root=workspace_root,
             output_dir=run_dirs.output_dir,
             hot_event=hot_event,
@@ -539,7 +541,7 @@ def run_hot_event_dict_evaluations(
 
     results: list[tuple[Path, dict[str, Any]]] = []
     for hot_event in selected_events:
-        output_path, output_payload = _run_hot_event_evaluation(
+        output_path, output_payload, _stage_times = _run_hot_event_evaluation(
             workspace_root=workspace_root,
             output_dir=run_dirs.output_dir,
             hot_event=hot_event,
@@ -604,7 +606,7 @@ def run_hot_event_multiplatform_evaluations(
 
     results: list[tuple[Path, dict[str, Any]]] = []
     for hot_event in selected_events:
-        output_path, output_payload = _run_hot_event_multiplatform_evaluation(
+        output_path, output_payload, _stage_times = _run_hot_event_multiplatform_evaluation(
             workspace_root=workspace_root,
             output_dir=run_dirs.output_dir,
             hot_event=hot_event,
@@ -638,12 +640,18 @@ def _run_hot_event_multiplatform_evaluation(
     use_llm: bool = True,
     llm_client: Any | None = None,
     trace_dir: str | Path,
-) -> tuple[Path, dict[str, Any]]:
+) -> tuple[Path, dict[str, Any], dict[str, float]]:
     root = Path(workspace_root)
+    stage_times: dict[str, float] = {}
+    total_start = time.perf_counter()
+
+    t0 = time.perf_counter()
     client = llm_client
     if client is None and use_llm:
         client = OpenAICompatibleLLMClient.from_env_files(root)
+    stage_times["llm_client_init"] = time.perf_counter() - t0
 
+    t0 = time.perf_counter()
     pipeline_payload = hot_event_to_pipeline_payload(
         hot_event,
         max_selected_nodes=max_selected_nodes,
@@ -652,6 +660,7 @@ def _run_hot_event_multiplatform_evaluation(
         max_frequency_per_day=max_frequency_per_day,
         allowed_platforms=allowed_platforms,
     )
+    stage_times["hot_event_to_payload"] = time.perf_counter() - t0
 
     pipeline = StrategyPipeline(product_name="abc_reading")
     artifacts = pipeline.run_with_artifacts(
@@ -662,15 +671,21 @@ def _run_hot_event_multiplatform_evaluation(
         llm_client=client,
         target_user_id=None,
     )
+    for key, value in artifacts.stage_times.items():
+        stage_times[key] = value
 
     # 跨平台模式同样产出五维调度策略：先由 PlatformDispatcher 按平台独立选人，
     # 再把选人结果翻译回策略节点，复用 build_eval_output 同一套节点规划与动作生成，
     # 保证两种模式的动作口径、阶段口径与内容来源完全一致。
+    t0 = time.perf_counter()
     dispatch_result = PlatformDispatcher().dispatch(
         score_result=artifacts.score_result,
         platform_specs=platform_specs,
         campaign_window_hours=campaign_window_hours,
     )
+    stage_times["platform_dispatch"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
     output_payload, content_llm_meta = build_multiplatform_output(
         hot_event=hot_event,
         strategy_result=artifacts.strategy_result,
@@ -680,6 +695,7 @@ def _run_hot_event_multiplatform_evaluation(
         use_llm=use_llm,
         llm_client=client,
     )
+    stage_times["content_generation"] = time.perf_counter() - t0
 
     target_dir = Path(output_dir)
     # 文件名同时带事件 ID、多平台标记与平台集合，
@@ -697,6 +713,7 @@ def _run_hot_event_multiplatform_evaluation(
         encoding="utf-8",
     )
 
+    t0 = time.perf_counter()
     _write_pipeline_trace(
         trace_dir=trace_dir,
         hot_event=hot_event,
@@ -709,7 +726,10 @@ def _run_hot_event_multiplatform_evaluation(
         content_llm_meta=content_llm_meta,
         run_label=f"multiplatform_{platform_tag}",
     )
-    return output_path, output_payload
+    stage_times["write_trace"] = time.perf_counter() - t0
+
+    stage_times["event_total"] = time.perf_counter() - total_start
+    return output_path, output_payload, stage_times
 
 
 def build_multiplatform_output(
@@ -2272,12 +2292,18 @@ def _run_hot_event_evaluation(
     trace_dir: str | Path,
     target_user_id: str | None = None,
     dispatch_platform: str | None = None,
-) -> tuple[Path, dict[str, Any]]:
+) -> tuple[Path, dict[str, Any], dict[str, float]]:
     root = Path(workspace_root)
+    stage_times: dict[str, float] = {}
+    total_start = time.perf_counter()
+
+    t0 = time.perf_counter()
     client = llm_client
     if client is None and use_llm:
         client = OpenAICompatibleLLMClient.from_env_files(root)
+    stage_times["llm_client_init"] = time.perf_counter() - t0
 
+    t0 = time.perf_counter()
     pipeline_payload = hot_event_to_pipeline_payload(
         hot_event,
         max_selected_nodes=max_selected_nodes,
@@ -2286,6 +2312,7 @@ def _run_hot_event_evaluation(
         max_frequency_per_day=max_frequency_per_day,
         allowed_platforms=allowed_platforms,
     )
+    stage_times["hot_event_to_payload"] = time.perf_counter() - t0
 
     pipeline = StrategyPipeline(product_name="abc_reading")
     artifacts = pipeline.run_with_artifacts(
@@ -2297,6 +2324,11 @@ def _run_hot_event_evaluation(
         target_user_id=target_user_id,
         dispatch_platform=dispatch_platform,
     )
+    # 把 pipeline 子键展开成顶层键，便于压测面板直接拿 event_parser/feature_builder/...
+    for key, value in artifacts.stage_times.items():
+        stage_times[key] = value
+
+    t0 = time.perf_counter()
     output_payload, content_llm_meta = build_eval_output(
         hot_event=hot_event,
         strategy_result=artifacts.strategy_result,
@@ -2304,7 +2336,9 @@ def _run_hot_event_evaluation(
         use_llm=use_llm,
         llm_client=client,
     )
+    stage_times["content_generation"] = time.perf_counter() - t0
 
+    t0 = time.perf_counter()
     target_dir = Path(output_dir)
     output_path = target_dir / f"{artifacts.strategy_result.event.event_id}_strategy_output.json"
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2312,12 +2346,14 @@ def _run_hot_event_evaluation(
         json.dumps(output_payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    stage_times["write_output"] = time.perf_counter() - t0
 
     # run_label 同时透传选人状态：targeted / ok / manual_required / no_eligible_nodes
     if target_user_id:
         run_label_value = "targeted"
     else:
         run_label_value = artifacts.strategy_result.summary.status
+    t0 = time.perf_counter()
     _write_pipeline_trace(
         trace_dir=trace_dir,
         hot_event=hot_event,
@@ -2328,7 +2364,10 @@ def _run_hot_event_evaluation(
         content_llm_meta=content_llm_meta,
         run_label=run_label_value,
     )
-    return output_path, output_payload
+    stage_times["write_trace"] = time.perf_counter() - t0
+
+    stage_times["event_total"] = time.perf_counter() - total_start
+    return output_path, output_payload, stage_times
 
 
 def _build_llm_node_texts(

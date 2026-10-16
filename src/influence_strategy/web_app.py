@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import copy
 import json
+import random
 import re
 import shutil
+import statistics
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -33,11 +37,17 @@ from .platform_dispatcher import PlatformSpec, to_json_dict
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_EVENTS_PATH = PROJECT_ROOT / "eval" / "hot_event_opinion_variants_200.json"
 WEB_RUNS_ROOT = PROJECT_ROOT / "outputs" / "web_runs"
+BENCHMARK_RUNS_ROOT = WEB_RUNS_ROOT / "benchmark_runs"
 FRONTEND_DIST = PROJECT_ROOT / "web" / "frontend" / "dist"
 MAX_WORKERS = 1
+BENCHMARK_DEFAULT_ITERATIONS = 5
 
 _RUNS: dict[str, dict[str, Any]] = {}
 _LOCK = threading.Lock()
+# 压测任务与普通 run 完全隔离：单独一份内存缓存 + 独立落盘目录，方便前端做
+# "测试历史"列表，不与主控制台的运行历史混在一起。
+_BENCHMARKS: dict[str, dict[str, Any]] = {}
+_BENCHMARK_LOCK = threading.Lock()
 _EXECUTOR = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
 
@@ -81,6 +91,20 @@ class TextRunRequest(BaseModel):
 
 class EvalRunRequest(BaseModel):
     options: RunOptions = Field(default_factory=lambda: RunOptions(event_limit=200))
+
+
+class BenchmarkRequest(BaseModel):
+    """一键 N 次压测的请求体（默认 5 轮）。
+
+    与 ``EvalRunRequest`` 的差别：压测**异步**执行，``POST`` 立即返回 queued 状态
+    与 ``benchmark_id``，前端凭它轮询进度；每轮自动随机抽一条互不相同的
+    hot_event，只有在显式传 ``event_id`` 时才锁定同一条事件跑 N 轮。
+    """
+
+    options: RunOptions = Field(default_factory=RunOptions)
+    iterations: int = Field(default=BENCHMARK_DEFAULT_ITERATIONS, ge=1, le=10)
+    event_id: str | None = None
+    label: str | None = None
 
 
 class RunStatus(BaseModel):
@@ -281,6 +305,112 @@ def create_app() -> FastAPI:
         )
         return _read_status(status["run_id"])
 
+    @app.post("/api/benchmarks")
+    def run_benchmark(request: BenchmarkRequest) -> dict[str, Any]:
+        """一键 N 次压测（默认 5）：**异步**提交，立即返回 queued 状态。
+
+        设计要点：
+
+        * 不阻塞请求 —— 后台线程串行跑 N 轮，前端拿 ``benchmark_id`` 后轮询
+          ``GET /api/benchmarks/{benchmark_id}``；因此用户可以在上一次测试还在
+          "测试中"的时候继续点新测试，新任务会排队（线程池 max_workers=1）。
+        * 事件随机且互不相同 —— 任务开始时就从 200 条 hot_event 里不放回地抽
+          ``iterations`` 条，保证同一组压测里每个测试点跑的都是不同事件；这样
+          阶段耗时不会被同一条事件的画像 / LLM 缓存"预热"。
+        * LLM 开关只跑当前 ``use_llm`` 的那一种；想对比开/关差异，切换顶栏
+          开关后再点一次，两次结果会各自作为一条测试历史保留。
+        """
+        options = request.options.model_copy(deep=True)
+        # 压测面板不接 run 事件，因此强制 event_limit=1。
+        options.event_limit = 1
+        if request.event_id:
+            options.event_id = request.event_id
+        _validate_dispatch_options(options)
+
+        iterations = int(request.iterations)
+        label = (request.label or "").strip() or None
+        benchmark_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        benchmark_dir = BENCHMARK_RUNS_ROOT / benchmark_id
+        (benchmark_dir / "output").mkdir(parents=True, exist_ok=True)
+        (benchmark_dir / "trace").mkdir(parents=True, exist_ok=True)
+
+        now = _now()
+        payload: dict[str, Any] = {
+            "benchmark_id": benchmark_id,
+            "label": label,
+            "state": "queued",
+            "iterations": iterations,
+            "completed": 0,
+            "failed": 0,
+            "successful_iterations": 0,
+            "failed_iterations": 0,
+            "options": options.model_dump(mode="json"),
+            "events": [],
+            "runs": [],
+            "summary": None,
+            "output_dir": str(benchmark_dir),
+            "created_at": now,
+            "updated_at": now,
+            "error": None,
+        }
+        _write_benchmark(benchmark_id, payload)
+
+        _EXECUTOR.submit(
+            _benchmark_job_wrapper,
+            benchmark_id,
+            options,
+            iterations,
+            request.event_id,
+        )
+        return dict(payload)
+
+    @app.get("/api/benchmarks")
+    def list_benchmarks() -> dict[str, Any]:
+        """测试历史列表（压测专用，与 ``/api/runs`` 完全隔离）。
+
+        内存缓存优先（刚提交还在排队 / 运行中的任务不在磁盘上完整），磁盘兜底
+        （服务重启后仍能看到历史）。按创建时间倒序。
+        """
+        BENCHMARK_RUNS_ROOT.mkdir(parents=True, exist_ok=True)
+        merged: dict[str, dict[str, Any]] = {}
+        for path in BENCHMARK_RUNS_ROOT.glob("*/benchmark.json"):
+            try:
+                stored = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            key = str(stored.get("benchmark_id") or path.parent.name)
+            merged[key] = _normalize_benchmark_payload(stored)
+        with _BENCHMARK_LOCK:
+            merged.update({key: dict(value) for key, value in _BENCHMARKS.items()})
+
+        items = [_benchmark_history_item(payload) for payload in merged.values()]
+        items.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+        return {"benchmarks": items[:50]}
+
+    @app.get("/api/benchmarks/{benchmark_id}")
+    def get_benchmark(benchmark_id: str) -> dict[str, Any]:
+        """单条测试详情（含每轮 stage_times / summary），供前端轮询。"""
+        return _read_benchmark(benchmark_id)
+
+    @app.delete("/api/benchmarks/{benchmark_id}")
+    def delete_benchmark(benchmark_id: str) -> dict[str, Any]:
+        """删除一条测试历史（磁盘目录 + 内存缓存）。
+
+        "测试中"的任务拒绝删除：后台线程仍在往该目录写 ``benchmark.json``。
+        """
+        payload = _read_benchmark(benchmark_id)
+        if str(payload.get("state")) in {"queued", "running"}:
+            raise HTTPException(
+                status_code=409,
+                detail=f"测试 {benchmark_id} 仍在进行（state={payload.get('state')}），请等待结束后再删除。",
+            )
+        benchmark_dir = _benchmark_dir(benchmark_id)
+        if benchmark_dir.exists():
+            shutil.rmtree(benchmark_dir)
+        with _BENCHMARK_LOCK:
+            _BENCHMARKS.pop(benchmark_id, None)
+        return {"deleted": True, "benchmark_id": benchmark_id}
+
     @app.get("/api/runs")
     def list_runs() -> dict[str, Any]:
         WEB_RUNS_ROOT.mkdir(parents=True, exist_ok=True)
@@ -410,6 +540,26 @@ def _normalize_hot_event(event: dict[str, Any]) -> dict[str, Any]:
     if not normalized["event_title"] and not normalized["event_summary"]:
         raise HTTPException(status_code=400, detail="event_title or event_summary is required.")
     return normalized
+
+
+def _pick_random_hot_events(
+    hot_events: list[dict[str, Any]], *, count: int
+) -> list[dict[str, Any]]:
+    """从 200 条 hot_event 集合里**不放回**地随机抽 ``count`` 条用于压测。
+
+    用于 ``/api/benchmarks``：一次测试里每个测试点跑的都是不同事件，避免同一
+    事件的画像 / LLM 缓存被"预热"后拉低后续轮次耗时，从而更准确地反映 LLM
+    开关 / 分发配置差异。
+
+    - 当集合为空时返回 ``[]``，由上层抛 404；
+    - ``count`` 超过集合大小时返回全部（不放回，因此不会有重复）。
+    """
+    if not hot_events:
+        return []
+    size = max(0, min(count, len(hot_events)))
+    if size == 0:
+        return []
+    return random.sample(hot_events, size)
 
 
 def _parse_options(raw_options: str) -> RunOptions:
@@ -566,7 +716,7 @@ def _run_events_job(*, run_id: str, events: list[dict[str, Any]], options: RunOp
         _update_status(run_id, current_event_id=event_id)
         try:
             if options.dispatch_mode == "cross_platform":
-                output_path, payload = _run_hot_event_multiplatform_evaluation(
+                output_path, payload, _stage_times = _run_hot_event_multiplatform_evaluation(
                     workspace_root=PROJECT_ROOT,
                     output_dir=effective_output_dir,
                     hot_event=normalized_event,
@@ -581,7 +731,7 @@ def _run_events_job(*, run_id: str, events: list[dict[str, Any]], options: RunOp
                     trace_dir=effective_trace_dir,
                 )
             else:
-                output_path, payload = _run_hot_event_evaluation(
+                output_path, payload, _stage_times = _run_hot_event_evaluation(
                     workspace_root=PROJECT_ROOT,
                     output_dir=effective_output_dir,
                     hot_event=normalized_event,
@@ -604,6 +754,7 @@ def _run_events_job(*, run_id: str, events: list[dict[str, Any]], options: RunOp
                     output_path=output_path,
                     payload=payload,
                     dispatch_mode=options.dispatch_mode,
+                    stage_times=_stage_times,
                 ),
             )
         except HTTPException:
@@ -617,8 +768,13 @@ def _result_summary(
     output_path: Path,
     payload: dict[str, Any],
     dispatch_mode: Literal["single_target", "multi_user", "cross_platform"] = "multi_user",
+    stage_times: dict[str, float] | None = None,
 ) -> dict[str, Any]:
-    """把每条事件的最终 payload 压缩成结果列表项；不同 dispatch_mode 走不同分支。"""
+    """把每条事件的最终 payload 压缩成结果列表项；不同 dispatch_mode 走不同分支。
+
+    ``stage_times`` 是该事件评估产物中各阶段耗时（秒），可选；
+    5 次压测面板会直接消费这层数据做阶段平均用时计算与可视化。
+    """
 
     # 多平台分发的输出文件名是 ``{event_id}_multiplatform_{tag}_strategy_output.json``，
     # 先剥掉 ``_multiplatform`` 后缀，再去掉 ``_strategy_output.json``，得到 event_id。
@@ -635,6 +791,8 @@ def _result_summary(
         "event_name": payload.get("事件名称", event_id),
         "dispatch_mode": dispatch_mode,
         "json_output_path": str(output_path),
+        # 阶段耗时：键名稳定，缺省为空 dict；前端用 0 做兜底展示。
+        "stage_times": dict(stage_times) if stage_times else {},
     }
 
     # single_target / multi_user / cross_platform 现在共用同一套五维调度策略结构，
@@ -828,4 +986,340 @@ def _now() -> str:
 
 def _load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _summarize_benchmark(
+    *, iterations: int, results: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """汇总 5 次压测结果：各阶段平均 / 总用时 / 每次迭代总用时。
+
+    输入 ``results`` 是 ``run_benchmark`` 累积的迭代列表；只统计 ``ok=True`` 的轮。
+    输出结构是前端 5 次压测面板直接消费的形状（含 ``stage_averages`` /
+    ``stage_min_max`` / ``per_iteration_total`` 等）。
+    """
+    ok_results = [item for item in results if item.get("ok")]
+    # 只统计"已明确失败"的轮次；未跑完的轮次不算失败（异步任务会边跑边更新，
+    # 中间状态下的 iterations - len(ok_results) 会把"还没轮到"误判为失败）。
+    failed_iterations = sum(1 for item in results if not item.get("ok"))
+
+    # 各阶段汇总：只在所有成功轮里都出现过的阶段才计算。
+    stage_samples: dict[str, list[float]] = {}
+    per_iteration_total: list[float] = []
+    per_iteration_iteration: list[int] = []
+    for item in ok_results:
+        iteration_index = int(item.get("iteration", 0))
+        stage_times = item.get("stage_times") or {}
+        for stage, duration in stage_times.items():
+            stage_samples.setdefault(stage, []).append(float(duration))
+        event_total = float(item.get("elapsed_seconds", 0.0))
+        per_iteration_total.append(event_total)
+        per_iteration_iteration.append(iteration_index)
+
+    stage_averages: dict[str, float] = {}
+    stage_min_max: dict[str, dict[str, float]] = {}
+    for stage, samples in stage_samples.items():
+        stage_averages[stage] = statistics.fmean(samples)
+        stage_min_max[stage] = {
+            "min": min(samples),
+            "max": max(samples),
+            "samples": samples,
+        }
+
+    # 总用时：从所有轮次的 elapsed_seconds 求和（这是端到端的真实等待时间）。
+    total_seconds = sum(per_iteration_total)
+    return {
+        "iterations": iterations,
+        "successful_iterations": len(ok_results),
+        "failed_iterations": failed_iterations,
+        "total_seconds": total_seconds,
+        "average_seconds": (
+            statistics.fmean(per_iteration_total) if per_iteration_total else 0.0
+        ),
+        "min_seconds": min(per_iteration_total) if per_iteration_total else 0.0,
+        "max_seconds": max(per_iteration_total) if per_iteration_total else 0.0,
+        "stage_averages": stage_averages,
+        "stage_min_max": stage_min_max,
+        "per_iteration": [
+            {"iteration": iteration, "seconds": seconds}
+            for iteration, seconds in zip(per_iteration_iteration, per_iteration_total)
+        ],
+    }
+
+
+# --- 压测（benchmark）任务：内存缓存 + 独立落盘目录 + 后台线程 ---
+
+
+def _benchmark_dir(benchmark_id: str) -> Path:
+    return BENCHMARK_RUNS_ROOT / _safe_run_id(benchmark_id)
+
+
+def _benchmark_path(benchmark_id: str) -> Path:
+    return _benchmark_dir(benchmark_id) / "benchmark.json"
+
+
+def _read_benchmark(benchmark_id: str) -> dict[str, Any]:
+    """读一条压测状态：内存优先，磁盘兜底（服务重启后依然能看到历史）。"""
+    with _BENCHMARK_LOCK:
+        cached = _BENCHMARKS.get(benchmark_id)
+        if cached is not None:
+            return dict(cached)
+    path = _benchmark_path(benchmark_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Benchmark not found: {benchmark_id}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Benchmark 状态文件损坏: {benchmark_id}"
+        ) from exc
+    payload = _normalize_benchmark_payload(payload)
+    with _BENCHMARK_LOCK:
+        _BENCHMARKS[benchmark_id] = payload
+    return dict(payload)
+
+
+def _normalize_benchmark_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """兼容早期"同步压测"落盘的 ``benchmark.json``（缺 state / completed / events）。
+
+    旧版是跑完才写盘的，所以缺 ``state`` 的文件一定是已完成的历史记录；
+    事件字段旧版叫 ``event``（单条），这里统一补成 ``events`` 列表。
+    """
+    normalized = dict(payload)
+    normalized.setdefault("state", "completed")
+    normalized.setdefault("completed", normalized.get("successful_iterations") or 0)
+    normalized.setdefault("failed", normalized.get("failed_iterations") or 0)
+    normalized.setdefault("error", None)
+    normalized.setdefault("updated_at", normalized.get("created_at"))
+
+    events = normalized.get("events")
+    if not events:
+        single = normalized.get("event")
+        if isinstance(single, dict) and single.get("event_id"):
+            normalized["events"] = [{"iteration": 1, **single}]
+        else:
+            normalized["events"] = []
+    runs = normalized.get("runs")
+    normalized["runs"] = runs if isinstance(runs, list) else []
+    return normalized
+
+
+def _write_benchmark(benchmark_id: str, payload: dict[str, Any]) -> None:
+    """覆盖写内存缓存与 ``benchmark.json``。
+
+    这里必须 deepcopy：``events`` / ``runs`` 是后台任务逐轮 append 的同一个
+    list，浅拷贝会让内存缓存"提前"看到后续轮次的事件（``completed`` 与实际
+    事件数对不上）。
+    """
+    snapshot = copy.deepcopy(payload)
+    with _BENCHMARK_LOCK:
+        _BENCHMARKS[benchmark_id] = snapshot
+    path = _benchmark_path(benchmark_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _update_benchmark(benchmark_id: str, **updates: Any) -> dict[str, Any]:
+    """读-改-写：更新内存里那条压测并落盘，返回更新后的快照。
+
+    每条压测只有一个后台线程在写，因此这里不做跨键加锁的复杂处理；
+    锁只用来保护 ``_BENCHMARKS`` 字典本身。
+    """
+    with _BENCHMARK_LOCK:
+        payload = dict(_BENCHMARKS.get(benchmark_id) or {})
+        payload.update(updates)
+        payload["updated_at"] = _now()
+        snapshot = dict(payload)
+        _BENCHMARKS[benchmark_id] = snapshot
+    path = _benchmark_path(benchmark_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+    return snapshot
+
+
+def _benchmark_history_item(payload: dict[str, Any]) -> dict[str, Any]:
+    """把完整压测 payload 裁剪成"测试历史列表"需要的轻量条目。"""
+    summary = payload.get("summary") or {}
+    options = payload.get("options") or {}
+    events = payload.get("events") or []
+    return {
+        "benchmark_id": payload.get("benchmark_id"),
+        "label": payload.get("label"),
+        "state": payload.get("state") or "running",
+        "iterations": payload.get("iterations"),
+        "completed": payload.get("completed") or 0,
+        "failed": payload.get("failed") or 0,
+        "successful_iterations": payload.get("successful_iterations") or 0,
+        "failed_iterations": payload.get("failed_iterations") or 0,
+        "use_llm": bool(options.get("use_llm")),
+        "dispatch_mode": options.get("dispatch_mode"),
+        "event_count": len(events),
+        "events": events,
+        "created_at": payload.get("created_at"),
+        "updated_at": payload.get("updated_at"),
+        "total_seconds": summary.get("total_seconds"),
+        "average_seconds": summary.get("average_seconds"),
+        "output_dir": payload.get("output_dir"),
+        "error": payload.get("error"),
+    }
+
+
+def _benchmark_job_wrapper(
+    benchmark_id: str,
+    options: RunOptions,
+    iterations: int,
+    pinned_event_id: str | None,
+) -> None:
+    """后台线程入口：把压测从 queued 推进到 running → completed/failed。"""
+    try:
+        _update_benchmark(benchmark_id, state="running")
+        _run_benchmark_job(
+            benchmark_id=benchmark_id,
+            options=options,
+            iterations=iterations,
+            pinned_event_id=pinned_event_id,
+        )
+        payload = _read_benchmark(benchmark_id)
+        succeeded = int(payload.get("successful_iterations") or 0)
+        _update_benchmark(
+            benchmark_id,
+            state="completed" if succeeded > 0 else "failed",
+            error=None if succeeded > 0 else "所有轮次都失败了",
+        )
+    except Exception as exc:  # pragma: no cover - defensive boundary for background jobs
+        _update_benchmark(
+            benchmark_id, state="failed", error=f"{type(exc).__name__}: {exc}"
+        )
+
+
+def _run_benchmark_job(
+    *,
+    benchmark_id: str,
+    options: RunOptions,
+    iterations: int,
+    pinned_event_id: str | None,
+) -> None:
+    """串行跑 N 轮压测，每轮换一条事件；每轮结束都刷新一次状态供前端轮询。
+
+    事件选择策略：
+
+    * 用户显式传了 ``event_id`` → 锁定该事件跑 N 轮（用于对比稳定性）；
+    * 否则 → 一开始就**不放回**地随机抽 N 条，保证一次测试内每个测试点的事件
+      都不一样；只有当 N 超过事件总数时才退化为允许重复。
+    """
+    benchmark_dir = _benchmark_dir(benchmark_id)
+    output_root = benchmark_dir / "output"
+    trace_root = benchmark_dir / "trace"
+
+    hot_events = load_hot_events(DEFAULT_EVENTS_PATH)
+    if pinned_event_id:
+        picked = select_hot_events(hot_events, event_id=pinned_event_id, event_limit=1)
+        if not picked:
+            raise RuntimeError(f"指定的事件 ID 没有匹配到 hot_event：{pinned_event_id}")
+        selected = [picked[0]] * iterations
+    else:
+        selected = _pick_random_hot_events(hot_events, count=iterations)
+        if not selected:
+            raise RuntimeError("hot_event 集合为空，无法执行压测。")
+        while len(selected) < iterations:  # 轮数 > 事件总数时才允许重复
+            selected.append(random.choice(selected))
+
+    iteration_results: list[dict[str, Any]] = []
+    event_entries: list[dict[str, Any]] = []
+
+    for index, raw_event in enumerate(selected, start=1):
+        normalized_event = _normalize_hot_event(raw_event)
+        event_entry = {
+            "iteration": index,
+            "event_id": str(normalized_event["event_id"]),
+            "event_title": normalized_event.get("event_title"),
+            "domain": normalized_event.get("domain"),
+        }
+        event_entries.append(event_entry)
+        # 抽定就公告：让前端轮询立刻看到这一轮用的是哪条事件（显示为"测试中"）。
+        _update_benchmark(benchmark_id, events=list(event_entries))
+
+        iter_output_dir = output_root / f"iter_{index:02d}"
+        iter_trace_dir = trace_root / f"iter_{index:02d}"
+        iter_output_dir.mkdir(parents=True, exist_ok=True)
+        iter_trace_dir.mkdir(parents=True, exist_ok=True)
+
+        iteration_start = time.perf_counter()
+        try:
+            if options.dispatch_mode == "cross_platform":
+                output_path, payload, stage_times = _run_hot_event_multiplatform_evaluation(
+                    workspace_root=PROJECT_ROOT,
+                    output_dir=iter_output_dir,
+                    hot_event=normalized_event,
+                    platform_specs=list(options.platform_specs),
+                    profile_limit=options.profile_limit,
+                    max_selected_nodes=options.max_selected_nodes,
+                    risk_level=options.risk_level,
+                    campaign_window_hours=options.campaign_window_hours,
+                    max_frequency_per_day=options.max_frequency_per_day,
+                    allowed_platforms=options.allowed_platforms,
+                    use_llm=options.use_llm,
+                    trace_dir=iter_trace_dir,
+                )
+            else:
+                output_path, payload, stage_times = _run_hot_event_evaluation(
+                    workspace_root=PROJECT_ROOT,
+                    output_dir=iter_output_dir,
+                    hot_event=normalized_event,
+                    profile_limit=options.profile_limit,
+                    max_selected_nodes=options.max_selected_nodes,
+                    risk_level=options.risk_level,
+                    campaign_window_hours=options.campaign_window_hours,
+                    max_frequency_per_day=options.max_frequency_per_day,
+                    allowed_platforms=options.allowed_platforms,
+                    use_llm=options.use_llm,
+                    trace_dir=iter_trace_dir,
+                    target_user_id=options.target_user_id,
+                    dispatch_platform=options.dispatch_platform
+                    if options.dispatch_mode == "multi_user"
+                    else None,
+                )
+            elapsed = time.perf_counter() - iteration_start
+            iteration_results.append(
+                {
+                    "iteration": index,
+                    "run_id": f"{benchmark_id}_iter{index:02d}",
+                    "ok": True,
+                    "elapsed_seconds": elapsed,
+                    "stage_times": stage_times,
+                    "event": event_entry,
+                    "summary": _result_summary(
+                        output_path=output_path,
+                        payload=payload,
+                        dispatch_mode=options.dispatch_mode,
+                        stage_times=stage_times,
+                    ),
+                }
+            )
+        except Exception as exc:  # 单轮失败不影响其它轮
+            iteration_results.append(
+                {
+                    "iteration": index,
+                    "run_id": f"{benchmark_id}_iter{index:02d}",
+                    "ok": False,
+                    "elapsed_seconds": time.perf_counter() - iteration_start,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "stage_times": {},
+                    "event": event_entry,
+                    "summary": None,
+                }
+            )
+
+        # 每轮结束立即刷新：前端轮询能看到进度条与已完成的柱状数据逐步长出来。
+        succeeded = sum(1 for item in iteration_results if item["ok"])
+        failed = len(iteration_results) - succeeded
+        _update_benchmark(
+            benchmark_id,
+            completed=succeeded,
+            failed=failed,
+            successful_iterations=succeeded,
+            failed_iterations=failed,
+            events=event_entries,
+            runs=iteration_results,
+            summary=_summarize_benchmark(iterations=iterations, results=iteration_results),
+        )
 

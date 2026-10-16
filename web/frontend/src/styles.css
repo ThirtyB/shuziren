@@ -1425,3 +1425,361 @@ details pre {
   font-size: 12px;
   white-space: nowrap;
 }
+
+/* === 一键 5 次压测面板 === */
+.benchmark-summary {
+  border-color: #cfe4dd;
+}
+
+.benchmark-summary .sub-section-head h3 {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.benchmark-summary-view {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.benchmark-chart-block {
+  border: 1px solid #d8e0e7;
+  border-radius: 8px;
+  background: #fbfcfd;
+  padding: 12px;
+}
+
+.benchmark-chart-block h4 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: #10212f;
+}
+
+.benchmark-bar-chart {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.benchmark-bar-chart svg {
+  display: block;
+  width: 100%;
+  min-width: 320px;
+}
+
+.benchmark-stage-detail {
+  border: 1px solid #d8e0e7;
+  border-radius: 8px;
+  background: #fbfcfd;
+  padding: 10px 12px;
+}
+
+.benchmark-stage-detail summary {
+  padding: 0;
+  color: #0f5f59;
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.benchmark-runs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid #d8e0e7;
+  border-radius: 8px;
+  background: #fbfcfd;
+  padding: 12px;
+}
+
+.benchmark-runs h3 {
+  margin: 0;
+  font-size: 13px;
+  color: #10212f;
+}
+
+.benchmark-runs-table {
+  width: 100%;
+  min-width: 520px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.benchmark-runs-table th,
+.benchmark-runs-table td {
+  padding: 8px 9px;
+  border-bottom: 1px solid #e5ebf0;
+  vertical-align: middle;
+  text-align: left;
+}
+
+.benchmark-runs-table th {
+  background: #f2f6f9;
+  color: #465767;
+  font-weight: 700;
+}
+
+.benchmark-runs-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.benchmark-run-event strong {
+  display: block;
+  color: #10212f;
+  font-size: 13px;
+}
+
+.benchmark-run-event small {
+  color: #617080;
+  font-size: 11px;
+}
+
+.benchmark-run-ids {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.benchmark-run-ids span {
+  font-family: Consolas, "SFMono-Regular", monospace;
+  border: 1px solid #cfe4dd;
+  background: #edf9f6;
+  color: #0f5f59;
+  border-radius: 6px;
+  padding: 1px 6px;
+  font-size: 11px;
+}
+
+.benchmark-run-ids em {
+  color: #94a3b8;
+}
+
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  border: 1px solid transparent;
+}
+
+.status-chip.ok {
+  background: #e9f8ef;
+  border-color: #b7e4d2;
+  color: #146c43;
+}
+
+.status-chip.fail {
+  background: #fff1f2;
+  border-color: #fecdd3;
+  color: #991b1b;
+}
+
+.status-chip.llm-yes {
+  background: #e7f5f1;
+  border-color: #cfe4dd;
+  color: #0f5f59;
+}
+
+.status-chip.llm-no {
+  background: #fff7ed;
+  border-color: #fde6c1;
+  color: #8a4b08;
+}
+
+.benchmark-samples {
+  font-size: 11px;
+}
+
+.benchmark-samples span {
+  border: 1px solid #cdd7df;
+  border-radius: 6px;
+  padding: 1px 6px;
+  margin-right: 4px;
+  background: #ffffff;
+  display: inline-block;
+}
+
+/* === 测试历史列表（压测专用，与运行历史隔离） === */
+.benchmark-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 6px 6px;
+  max-height: 460px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.benchmark-history-item {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto auto auto auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: #ffffff;
+  border: 1px solid #d8e0e7;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.benchmark-history-item:hover:not(.active) {
+  border-color: #0f766e;
+  background: #f6fbf9;
+}
+
+.benchmark-history-item.active {
+  border-color: #0f766e;
+  background: #e7f5f1;
+  box-shadow: 0 0 0 1px #0f766e inset;
+}
+
+.benchmark-history-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.benchmark-history-label {
+  font-weight: 700;
+  color: #10212f;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.benchmark-history-sub {
+  font-size: 10px;
+  color: #7b8b99;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.benchmark-history-tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.benchmark-history-progress {
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 11px;
+  color: #465767;
+}
+
+.benchmark-history-time {
+  font-size: 11px;
+  color: #7b8b99;
+  white-space: nowrap;
+}
+
+.benchmark-history-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  color: #465767;
+}
+
+.benchmark-history-state.state-running { color: #1d4ed8; }
+.benchmark-history-state.state-queued { color: #7b8b99; }
+.benchmark-history-state.state-completed { color: #146c43; }
+.benchmark-history-state.state-failed { color: #991b1b; }
+
+/* 详情面板头部/进度里的状态徽标 */
+.benchmark-state-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: 11px;
+  font-weight: 700;
+  border: 1px solid #d8e0e7;
+  background: #f2f6f9;
+  color: #465767;
+}
+
+.benchmark-state-chip.state-running {
+  background: #e8efff;
+  border-color: #c7d7fb;
+  color: #1d4ed8;
+}
+
+.benchmark-state-chip.state-queued {
+  background: #f4f6f8;
+  border-color: #dbe2e8;
+  color: #7b8b99;
+}
+
+.benchmark-state-chip.state-completed {
+  background: #e9f8ef;
+  border-color: #b7e4d2;
+  color: #146c43;
+}
+
+.benchmark-state-chip.state-failed {
+  background: #fff1f2;
+  border-color: #fecdd3;
+  color: #991b1b;
+}
+
+.status-chip.pending {
+  background: #f4f6f8;
+  border-color: #dbe2e8;
+  color: #7b8b99;
+}
+
+.benchmark-progress-text {
+  margin-top: -4px;
+  color: #617080;
+}
+
+.benchmark-label {
+  font-size: 12px;
+  color: #0f5f59;
+  background: #e7f5f1;
+  border: 1px solid #cfe4dd;
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+.benchmark-footnote {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.benchmark-runs h3 {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.muted {
+  color: #94a3b8;
+  font-style: normal;
+}
+
+.detail-panel {
+  position: sticky;
+  top: 14px;
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+}
+
+@media (max-width: 1100px) {
+  .detail-panel {
+    position: static;
+    max-height: none;
+  }
+}
