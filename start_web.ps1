@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   - Auto-locates project root (the script's own folder)
-  - Starts the backend with D:\python\python.exe (deps already installed)
+  - Starts the backend with the project venv (.venv\Scripts\python.exe)
   - Runs pip install -e . on first launch (so uvicorn can import influence_strategy)
   - Runs npm install + npm run build only when dist/ is missing or stale
   - prod mode: uvicorn in the current window, Ctrl-C to stop
@@ -15,7 +15,7 @@
   dev  : also start vite dev server, open http://127.0.0.1:5173
 
 .PARAMETER PythonExe
-  Path of the Python interpreter, default D:\python\python.exe
+  Path of the Python interpreter, default: <project>\.venv\Scripts\python.exe
 
 .PARAMETER Port
   uvicorn port, default 8000
@@ -30,7 +30,7 @@
 param(
     [ValidateSet('prod', 'dev')]
     [string]$Mode = 'prod',
-    [string]$PythonExe = 'D:\python\python.exe',
+    [string]$PythonExe = '',
     [int]$Port = 8000
 )
 
@@ -43,6 +43,11 @@ Set-Location $ProjectRoot
 Write-Host "[1/5] Project root: $ProjectRoot" -ForegroundColor Cyan
 
 # 2. Check the Python interpreter
+# 默认用项目自带的 venv；$PSScriptRoot 在 [CmdletBinding()] 脚本的
+# param 默认值里为空，所以必须在这里（脚本体内）解析。
+if (-not $PythonExe) {
+    $PythonExe = Join-Path $ProjectRoot '.venv\Scripts\python.exe'
+}
 if (-not (Test-Path $PythonExe)) {
     throw "Python interpreter not found: $PythonExe (pass -PythonExe <path>)"
 }

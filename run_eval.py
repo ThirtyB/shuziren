@@ -6,6 +6,7 @@ import sys
 import traceback
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SRC_DIR = PROJECT_ROOT / "src"
@@ -433,6 +434,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "按各平台自身归属选人，两者都不使用该参数。"
         ),
     )
+    parser.add_argument(
+        "--recall-size",
+        type=int,
+        default=200,
+        help=(
+            "分层召回层目标人数（35,636 → N）；默认 200。"
+            "传 0 或负数则关闭召回，恢复全量 35,636。"
+        ),
+    )
+    parser.add_argument(
+        "--recall-mode",
+        type=str,
+        default="platform_aware",
+        choices=["platform_aware", "off"],
+        help=(
+            "分层召回模式：默认 platform_aware。"
+            "off 表示关闭召回，等价于 --recall-size 0。"
+        ),
+    )
     return parser
 
 
@@ -525,6 +545,15 @@ def main() -> int:
         effective_dispatch_platform = dispatch_platform or normalize_platform_key(
             DATASET_PLATFORM_VALUES[0]
         )
+    # 召回层：off / size≤0 → 关闭；其它 → 按 (size, mode) 透传到入口。
+    # 单人 target_user_id 强制唯一节点，召回无意义，下游 _run_hot_event_evaluation
+    # 内部会再判一次把它关掉。
+    effective_recall_mode: Literal["platform_aware"] | None = (
+        None if args.recall_mode == "off" else "platform_aware"
+    )
+    effective_recall_size: int = (
+        0 if args.recall_mode == "off" or args.recall_size <= 0 else args.recall_size
+    )
     # 参数校验全部通过后才创建本次运行目录，避免非法参数留下空目录。
     run_dirs = resolve_eval_run_dirs(
         workspace_root=workspace_root,
@@ -550,6 +579,8 @@ def main() -> int:
                 allowed_platforms=allowed_platforms,
                 use_llm=not args.disable_llm,
                 trace_dir=run_dirs.trace_dir,
+                recall_size=effective_recall_size,
+                recall_mode=effective_recall_mode,
             )
         elif args.image is not None or args.image_dir is not None:
             reference_events = load_hot_events(args.input.resolve())
@@ -578,6 +609,8 @@ def main() -> int:
                 trace_dir=run_dirs.trace_dir,
                 target_user_id=args.target_user_id,
                 dispatch_platform=effective_dispatch_platform,
+                recall_size=effective_recall_size,
+                recall_mode=effective_recall_mode,
             )
         else:
             results = run_hot_event_evaluations(
@@ -596,6 +629,8 @@ def main() -> int:
                 trace_dir=run_dirs.trace_dir,
                 target_user_id=args.target_user_id,
                 dispatch_platform=effective_dispatch_platform,
+                recall_size=effective_recall_size,
+                recall_mode=effective_recall_mode,
             )
     except Exception as exc:
         # 失败信息必须留在本次运行目录内，而不是散落到旧路径或只打印到终端。

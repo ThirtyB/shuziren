@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import math
 import re
+import threading
+import time
 from json import JSONDecodeError
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -24,8 +27,85 @@ from .models import (
 )
 from .prompts import build_feature_enrichment_system_prompt, build_feature_enrichment_user_prompt
 
+logger = logging.getLogger(__name__)
+
 _SPACE_RE = re.compile(r"\s+")
 _NON_TEXT_RE = re.compile(r"[^\w\u4e00-\u9fff]+", re.UNICODE)
+
+# ---------------------------------------------------------------------------
+# LLM 特征增强的可观测性：仅做统计/日志，不重试、不改评分/选人/风险口径
+# ---------------------------------------------------------------------------
+#
+# 设计目标：让 `_augment_with_llm` 不再静默吞掉 `LLMClientError / OSError /
+# ValueError / TypeError`。失败时仍按业务语义降级（节点保持原 `feature_ready_score=0`
+# 状态），但调用方与运维侧应当能从 metrics 与日志里立刻看到：
+#   1) 异常类型（`LLMClientError` / `OSError` / `ValueError` / `TypeError`）
+#   2) prompt 字符数（用于排查是否与请求体过大相关）
+#   3) 请求耗时（用于排查慢调用与超时）
+#   4) 本次是否成功
+#
+# 不要扩展 `except` 的范围、不要加重试、不要修改候选池/打分/选人/风险公式。
+_FEATURE_LLM_METRICS: dict[str, Any] = {
+    "calls": 0,
+    "success": 0,
+    "failure": 0,
+    "failure_by_type": {},
+    "last_call": None,
+}
+_FEATURE_LLM_METRICS_LOCK = threading.Lock()
+
+
+def _record_feature_llm_outcome(
+    *,
+    success: bool,
+    error_type: str | None,
+    error_message: str | None,
+    prompt_chars: int,
+    elapsed_sec: float,
+) -> None:
+    """记录一次 LLM 特征增强调用的结果。仅在 `_augment_with_llm` 内部调用。"""
+    with _FEATURE_LLM_METRICS_LOCK:
+        _FEATURE_LLM_METRICS["calls"] += 1
+        if success:
+            _FEATURE_LLM_METRICS["success"] += 1
+        else:
+            _FEATURE_LLM_METRICS["failure"] += 1
+            if error_type:
+                bucket = _FEATURE_LLM_METRICS["failure_by_type"]
+                bucket[error_type] = bucket.get(error_type, 0) + 1
+        _FEATURE_LLM_METRICS["last_call"] = {
+            "success": success,
+            "error_type": error_type,
+            "error_message": error_message,
+            "prompt_chars": prompt_chars,
+            "elapsed_sec": elapsed_sec,
+        }
+
+
+def get_feature_llm_metrics() -> dict[str, Any]:
+    """获取 LLM 特征增强的成功/失败统计快照（线程安全）。"""
+    with _FEATURE_LLM_METRICS_LOCK:
+        return {
+            "calls": _FEATURE_LLM_METRICS["calls"],
+            "success": _FEATURE_LLM_METRICS["success"],
+            "failure": _FEATURE_LLM_METRICS["failure"],
+            "failure_by_type": dict(_FEATURE_LLM_METRICS["failure_by_type"]),
+            "last_call": (
+                dict(_FEATURE_LLM_METRICS["last_call"])
+                if _FEATURE_LLM_METRICS["last_call"] is not None
+                else None
+            ),
+        }
+
+
+def reset_feature_llm_metrics() -> None:
+    """清零 LLM 特征增强的统计。仅供测试使用。"""
+    with _FEATURE_LLM_METRICS_LOCK:
+        _FEATURE_LLM_METRICS["calls"] = 0
+        _FEATURE_LLM_METRICS["success"] = 0
+        _FEATURE_LLM_METRICS["failure"] = 0
+        _FEATURE_LLM_METRICS["failure_by_type"] = {}
+        _FEATURE_LLM_METRICS["last_call"] = None
 
 
 EVENT_KEYWORD_EXPANSIONS = (
@@ -81,6 +161,10 @@ class FeatureBuilder:
         profile_limit: int | None = None,
         use_llm: bool = False,
         llm_client: Any | None = None,
+        *,
+        recall_size: int | None = None,
+        recall_mode: Literal["platform_aware"] | None = None,
+        dispatch_platform: str | None = None,
     ) -> FeatureBuildResult:
         loader = DataLoader(workspace_root, product_name=self.product_name)
         product_context = loader.load_product_context()
@@ -98,6 +182,21 @@ class FeatureBuilder:
             )
         except (JSONDecodeError, ValueError):
             source_user_ids = set()
+
+        # ---- 召回层：仅在显式开启时跑 ----
+        # 不改 ②③④ 的 LLM 逻辑；召回结果仅用于过滤 profiles / enriched_profiles，
+        # 5 个全量 max_log 由 build_features 内部在过滤前计算（保证 score 等价）。
+        recall_user_ids: set[str] | None = None
+        if recall_mode == "platform_aware" and recall_size and recall_size > 0:
+            recall_user_ids = self.recall_candidates(
+                profiles=profiles,
+                enriched_graph_attributes=enriched_profiles,
+                event=event,
+                dispatch_platform=dispatch_platform,
+                size=recall_size,
+                source_user_ids=source_user_ids,
+            )
+
         return self.build_features(
             product_context=product_context,
             profiles=profiles,
@@ -107,7 +206,152 @@ class FeatureBuilder:
             workspace_root=workspace_root,
             use_llm=use_llm,
             llm_client=llm_client,
+            recall_user_ids=recall_user_ids,
+            recall_mode=recall_mode,
         )
+
+    def recall_candidates(
+        self,
+        *,
+        profiles: dict[str, UserProfile],
+        enriched_graph_attributes: dict[str, Any],
+        event: ParsedEvent,
+        dispatch_platform: str | None = None,
+        size: int = 200,
+        source_user_ids: set[str] | None = None,
+    ) -> set[str]:
+        """platform_aware 分层召回 size 个 user_id。
+
+        复刻 ``_candidate_pool_for_llm`` (feature_builder.py:963-1035) 的 4 桶逻辑，
+        但使用**廉价 raw 字段**而非归一化 score：
+          1) recall 在 build_features 之前，5 个 log_score 归一化分母尚未计算；
+          2) 4 个 log_score 内部是单调变换，raw 排序与归一化排序等价。
+
+        桶排序键：
+          - topic_bucket: (kw_hits, neighbors+interactions, followers)
+          - interaction_bucket: is_source or activity-like; (received+made, followers, friends)
+          - diffusion_bucket: (neighbor+received+made, followers, friends)
+          - baseline_bucket: 原顺序
+        配额：``generic_high_influence_cap = max(2, size // 6)``，与现有 4 桶一致。
+        """
+        from .platform_profiles import normalize_platform_key
+
+        target = normalize_platform_key(dispatch_platform) if dispatch_platform else None
+        if target:
+            pool = [(uid, p) for uid, p in profiles.items() if normalize_platform_key(p.platform) == target]
+        else:
+            pool = list(profiles.items())
+
+        if not pool or size <= 0:
+            return set()
+
+        # 廉价关键词打分（不做 rapidfuzz；用 substring，够用）
+        keywords = self._prepare_keywords(self._event_match_keywords(event))
+        kw_count = len(keywords) or 1
+        source_set = source_user_ids or set()
+        cap = max(2, size // 6)
+
+        items: list[dict[str, Any]] = []
+        for uid, p in pool:
+            ga = enriched_graph_attributes.get(uid) if enriched_graph_attributes else None
+            target_ga = getattr(ga, "graph_attributes", None) if ga is not None else None
+            if target_ga is None:
+                target_ga = ga
+            neighbor = int(getattr(target_ga, "neighbor_count", 0)) if target_ga else 0
+            received = int(getattr(target_ga, "received_interaction_count", 0)) if target_ga else 0
+            made = int(getattr(target_ga, "made_interaction_count", 0)) if target_ga else 0
+            followers = int(p.user_followers)
+            friends = int(p.user_friends)
+            kw_hits = sum(
+                1
+                for k in keywords
+                if k
+                and (
+                    k in (p.user_description or "")
+                    or any(k in i for i in p.user_interests)
+                )
+            )
+            is_source = uid in source_set
+            # role_hint == "interaction_response" 的代理：is_source 或 高活动度
+            is_interaction_like = is_source or (received + made) >= 50
+            # generic_high_influence 的代理：粉丝多 + 无主题匹配
+            is_generic_hi = kw_hits == 0 and followers >= 50000
+            items.append(
+                {
+                    "user_id": uid,
+                    "kw_hits": kw_hits,
+                    "topic_score": kw_hits / kw_count,
+                    "neighbor": neighbor,
+                    "received": received,
+                    "made": made,
+                    "followers": followers,
+                    "friends": friends,
+                    "is_interaction_like": is_interaction_like,
+                    "is_generic_hi": is_generic_hi,
+                }
+            )
+
+        diversified: list[dict[str, Any]] = []
+        used: set[str] = set()
+
+        def add(sorted_items: list[dict[str, Any]], generic_cap: int | None = None) -> None:
+            generic_count = 0
+            for c in sorted_items:
+                if len(diversified) >= size:
+                    return
+                if c["user_id"] in used:
+                    continue
+                if generic_cap is not None and c["is_generic_hi"]:
+                    if generic_count >= generic_cap:
+                        continue
+                    generic_count += 1
+                diversified.append(c)
+                used.add(c["user_id"])
+
+        # topic_bucket
+        add(
+            sorted(
+                items,
+                key=lambda c: (
+                    c["kw_hits"],
+                    c["topic_score"],
+                    c["neighbor"] + c["received"],
+                    c["followers"],
+                ),
+                reverse=True,
+            )
+        )
+        # interaction_bucket
+        add(
+            sorted(
+                [c for c in items if c["is_interaction_like"]],
+                key=lambda c: (
+                    c["received"] + c["made"],
+                    c["followers"],
+                    c["friends"],
+                    c["neighbor"],
+                ),
+                reverse=True,
+            ),
+            generic_cap=cap,
+        )
+        # diffusion_bucket
+        add(
+            sorted(
+                items,
+                key=lambda c: (
+                    c["neighbor"] + c["received"] + c["made"],
+                    c["followers"],
+                    c["friends"],
+                ),
+                reverse=True,
+            ),
+            generic_cap=cap,
+        )
+        # baseline_bucket
+        add(items, generic_cap=cap)
+
+        return {c["user_id"] for c in diversified[:size]}
 
     def build_features(
         self,
@@ -119,13 +363,98 @@ class FeatureBuilder:
         workspace_root: str | Path | None = None,
         use_llm: bool = False,
         llm_client: Any | None = None,
+        *,
+        recall_user_ids: set[str] | None = None,
+        recall_mode: Literal["platform_aware"] | None = None,
     ) -> FeatureBuildResult:
         enriched_profiles = enriched_profiles or {}
         source_user_ids = source_user_ids or set()
         influencer_ids = set(product_context.influencer_ids)
+        # 召回**前**的全量候选人数（35,636）。必须在过滤前取，
+        # 供 summary.total_candidate_count 使用，让展示层能区分
+        # 「召回 200 / 全量 35,636」，不把 200 误读成全量。
+        total_candidate_count = len(profiles)
 
-        # ---- 向量化版 build_features：把 35k profile 装入 DataFrame，列运算一次算完 ----
+        # ---- 5 个全量 max_log（必须在召回过滤之前算） ----
+        # 这 5 个分母决定 follower_score / friend_score / neighbor_score /
+        # received_score / made_score 的归一化结果。为保证召回子集上的 score
+        # 与全量**逐字节相等**（验证见 tests/test_feature_builder.py 回归），
+        # 必须先扫一遍全量 profiles + enriched_profiles，再做召回过滤。
+        # 成本：5 列 × 35k int 读，< 50ms，可忽略。
+        def _ga_field(ep: Any, field: str) -> int:
+            ga = getattr(ep, "graph_attributes", None)
+            target = ga if ga is not None else ep
+            return int(getattr(target, field, 0))
+
+        follower_max_log = self._max_log_array(
+            np.array(
+                [int(p.user_followers) for p in profiles.values()], dtype=np.int64
+            )
+            if profiles
+            else np.array([0], dtype=np.int64)
+        )
+        friend_max_log = self._max_log_array(
+            np.array(
+                [int(p.user_friends) for p in profiles.values()], dtype=np.int64
+            )
+            if profiles
+            else np.array([0], dtype=np.int64)
+        )
+        # 与原版语义严格对齐：df 是 profiles 左连接 enriched_profiles，
+        # 所以分母只覆盖 **profiles 里存在的 user_id**；enriched 中多余的
+        # user_id 不参与（原版也一样）。
+        _ep_by_uid = enriched_profiles
+        neighbor_max_log = self._max_log_array(
+            np.array(
+                [
+                    _ga_field(_ep_by_uid[uid], "neighbor_count")
+                    for uid in profiles
+                    if uid in _ep_by_uid
+                ],
+                dtype=np.int64,
+            )
+            if profiles
+            else np.array([0], dtype=np.int64)
+        )
+        received_max_log = self._max_log_array(
+            np.array(
+                [
+                    _ga_field(_ep_by_uid[uid], "received_interaction_count")
+                    for uid in profiles
+                    if uid in _ep_by_uid
+                ],
+                dtype=np.int64,
+            )
+            if profiles
+            else np.array([0], dtype=np.int64)
+        )
+        made_max_log = self._max_log_array(
+            np.array(
+                [
+                    _ga_field(_ep_by_uid[uid], "made_interaction_count")
+                    for uid in profiles
+                    if uid in _ep_by_uid
+                ],
+                dtype=np.int64,
+            )
+            if profiles
+            else np.array([0], dtype=np.int64)
+        )
+
+        # ---- 召回过滤（profiles + enriched_profiles 都截到 recall_user_ids） ----
+        if recall_user_ids is not None:
+            profiles = {
+                uid: p for uid, p in profiles.items() if uid in recall_user_ids
+            }
+            enriched_profiles = {
+                uid: ep
+                for uid, ep in enriched_profiles.items()
+                if uid in recall_user_ids
+            }
+
+        # ---- 向量化版 build_features：把 N 个 profile 装入 DataFrame，列运算一次算完 ----
         # 与原版逐行 Python 循环的输出在数值上保持一致（< 1e-9），排序结果一致。
+        # 当 recall 开启时，N=recall_size（默认 200），否则 N=35,636。
 
         # 1. profiles -> DataFrame
         profile_rows = [
@@ -202,13 +531,8 @@ class FeatureBuilder:
         df["influencer_flag"] = df["user_id"].isin(influencer_ids)
         df["is_interaction_source"] = df["user_id"].isin(source_user_ids)
 
-        # 4. _max_log 与 _log_score 全部用 numpy
-        follower_max_log = self._max_log_array(df["user_followers"].to_numpy())
-        friend_max_log = self._max_log_array(df["user_friends"].to_numpy())
-        neighbor_max_log = self._max_log_array(df["neighbor_count"].to_numpy())
-        received_max_log = self._max_log_array(df["received_interaction_count"].to_numpy())
-        made_max_log = self._max_log_array(df["made_interaction_count"].to_numpy())
-
+        # 4. _log_score 全部用 numpy（5 个全量 max_log 已在本函数开头算出，
+        #    此处直接复用，保证召回子集上的 score 与全量逐字节相等）
         df["follower_score"] = self._log_score_array(
             df["user_followers"].to_numpy(), follower_max_log
         )
@@ -515,6 +839,11 @@ class FeatureBuilder:
             matched_node_count=matched_node_count,
             avg_feature_ready_score=avg_feature_ready,
             avg_topic_match_score=avg_topic_match,
+            recall_size=(
+                len(node_features) if recall_user_ids is not None else None
+            ),
+            recall_mode=recall_mode,
+            total_candidate_count=total_candidate_count,
         )
         return FeatureBuildResult(
             event=event,
@@ -743,16 +1072,55 @@ class FeatureBuilder:
             for feature in top_candidates
         ]
 
+        # 提示词预先构造（提到 try 之外）：既能在异常路径记录 prompt 体积，
+        # 也避免把字符串拼接的开销算进 LLM 耗时。
+        system_prompt = build_feature_enrichment_system_prompt()
+        user_prompt = build_feature_enrichment_user_prompt(
+            event=event,
+            candidate_cards=candidate_cards,
+        )
+        prompt_chars = len(system_prompt) + len(user_prompt)
+        started = time.monotonic()
+
         try:
             response = client.generate_json(
-                system_prompt=build_feature_enrichment_system_prompt(),
-                user_prompt=build_feature_enrichment_user_prompt(
-                    event=event,
-                    candidate_cards=candidate_cards,
-                ),
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
             )
-        except (LLMClientError, OSError, ValueError, TypeError):
+        except (LLMClientError, OSError, ValueError, TypeError) as exc:
+            elapsed_sec = time.monotonic() - started
+            error_type = type(exc).__name__
+            _record_feature_llm_outcome(
+                success=False,
+                error_type=error_type,
+                error_message=str(exc),
+                prompt_chars=prompt_chars,
+                elapsed_sec=elapsed_sec,
+            )
+            logger.warning(
+                "feature_builder._augment_with_llm failed: "
+                "error_type=%s prompt_chars=%d elapsed_sec=%.3f error=%r",
+                error_type,
+                prompt_chars,
+                elapsed_sec,
+                exc,
+            )
             return node_features
+
+        elapsed_sec = time.monotonic() - started
+        _record_feature_llm_outcome(
+            success=True,
+            error_type=None,
+            error_message=None,
+            prompt_chars=prompt_chars,
+            elapsed_sec=elapsed_sec,
+        )
+        logger.info(
+            "feature_builder._augment_with_llm success: "
+            "prompt_chars=%d elapsed_sec=%.3f",
+            prompt_chars,
+            elapsed_sec,
+        )
 
         raw_nodes = self._extract_llm_node_mapping(
             response=response,

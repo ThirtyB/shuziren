@@ -15,7 +15,10 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib64/
+# 只忽略仓库根目录下的 Python 打包产物；
+# 不能写成裸 "lib/"，否则会连带屏蔽 web/frontend/src/lib/ 前端源码。
+/lib/
+/lib64/
 parts/
 sdist/
 wheels/

@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .event_parser import RuleBasedEventParser
 from .feature_builder import FeatureBuilder
@@ -43,6 +43,8 @@ class StrategyPipeline:
         llm_client: Any | None = None,
         target_user_id: str | None = None,
         dispatch_platform: str | None = None,
+        recall_size: int | None = None,
+        recall_mode: Literal["platform_aware"] | None = None,
     ) -> StrategyResult:
         return self.run_with_artifacts(
             workspace_root=workspace_root,
@@ -52,6 +54,8 @@ class StrategyPipeline:
             llm_client=llm_client,
             target_user_id=target_user_id,
             dispatch_platform=dispatch_platform,
+            recall_size=recall_size,
+            recall_mode=recall_mode,
         ).strategy_result
 
     def run_with_artifacts(
@@ -63,6 +67,8 @@ class StrategyPipeline:
         llm_client: Any | None = None,
         target_user_id: str | None = None,
         dispatch_platform: str | None = None,
+        recall_size: int | None = None,
+        recall_mode: Literal["platform_aware"] | None = None,
     ) -> PipelineArtifacts:
         client = llm_client
         if client is None and use_llm:
@@ -89,6 +95,9 @@ class StrategyPipeline:
             profile_limit=profile_limit,
             use_llm=use_llm,
             llm_client=client,
+            recall_size=recall_size,
+            recall_mode=recall_mode,
+            dispatch_platform=dispatch_platform,
         )
         stage_times["feature_builder"] = time.perf_counter() - t0
 

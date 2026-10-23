@@ -87,7 +87,8 @@ button:disabled {
 
 .input-panel,
 .status-panel,
-.result-panel {
+.result-panel,
+.detail-panel {
   padding: 14px;
 }
 
@@ -649,7 +650,10 @@ details pre {
   border-radius: 0 0 8px 8px;
 }
 
-@media (max-width: 1280px) {
+/* 断点 1280 → 1120：三栏只需占 1068px 内容宽（340+280+420+28）加上
+   .app-shell 双侧 padding 36px，即视口 ≥1104px 就装得下；原先设 1280
+   会让 1280 宽的屏幕白白跌成两栏，第三块被挤到最下方。 */
+@media (max-width: 1120px) {
   .workspace-grid {
     grid-template-columns: minmax(320px, 430px) minmax(320px, 1fr);
   }

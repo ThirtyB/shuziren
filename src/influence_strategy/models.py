@@ -193,6 +193,17 @@ class FeatureBuildSummary(BaseModel):
     matched_node_count: int
     avg_feature_ready_score: float
     avg_topic_match_score: float
+    # ---- 召回层审计字段（FeatureBuilder 前置召回） ----
+    # 口径区分（展示/报告必须靠这两个字段，不能只看 node_count）：
+    #   node_count            = 本 result 里实际参与精算的人数（召回时为 200）
+    #   total_candidate_count = 召回前的全量候选人数（35,636），恒为全量口径
+    #   recall_size / recall_mode = None 表示关闭召回，此时两者相等。
+    # 5 个 log_score 的分母（follower/friend/neighbor/received/made max_log）
+    # **始终**取自 total_candidate_count 的全量集合，
+    # 保证召回子集上的 score 与全量逐位相等。
+    recall_size: int | None = None
+    recall_mode: Literal["platform_aware"] | None = None
+    total_candidate_count: int | None = None
 
 
 class FeatureBuildResult(BaseModel):

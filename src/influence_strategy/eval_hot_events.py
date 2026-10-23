@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Literal, Sequence
 
 from .llm_client import LLMClientError, OpenAICompatibleLLMClient
-from .models import NodeScore, ScoreResult, SelectedNode, StrategyNodePlan, StrategyResult
+from .models import (
+    FeatureBuildSummary,
+    NodeScore,
+    ScoreResult,
+    SelectedNode,
+    StrategyNodePlan,
+    StrategyResult,
+)
 from .pipeline import PipelineArtifacts, StrategyPipeline
 from .platform_dispatcher import (
     MultiPlatformDispatchResult,
@@ -32,6 +41,94 @@ from .selector import (
 from .strategy_generator import StrategyGenerator
 
 TRACE_PREVIEW_LIMIT = 25
+
+logger = logging.getLogger(__name__)
+
+# --------------------------------------------------------------------------- #
+# ④ 内容生成 LLM 的可观测性
+# --------------------------------------------------------------------------- #
+# 与 ``feature_builder._augment_with_llm``（②）同款设计：**只做统计与日志，
+# 不改变任何业务行为**。这里单独拆一套指标是因为 ④ 是"核心策略已出、只差文案"
+# 的最后一步，第二轮评估"能否把 ④ 挪出实时链路"必须有它自己的耗时/失败率基线。
+#
+# 记录字段：
+#   * ``success`` / ``failure``：本次是否真的拿到 LLM 文案
+#   * ``fallback_reason``：降级原因（llm_disabled / no_eligible_nodes /
+#     llm_not_configured / llm_request_failed:<异常类型> / invalid_llm_response /
+#     empty_llm_content）
+#   * ``attempted``：是否真的发起了远端请求（用于区分"没请求"和"请求失败"）
+#   * ``elapsed_sec``：本次调用墙钟耗时
+#   * ``prompt_chars``：请求体字符数（用于排查是否与请求体过大相关）
+_CONTENT_LLM_METRICS: dict[str, Any] = {
+    "calls": 0,
+    "success": 0,
+    "failure": 0,
+    "attempted": 0,
+    "fallback_by_reason": {},
+    "last_call": None,
+}
+_CONTENT_LLM_METRICS_LOCK = threading.Lock()
+
+
+def _record_content_llm_outcome(
+    *,
+    success: bool,
+    fallback_reason: str | None,
+    attempted: bool,
+    prompt_chars: int = 0,
+    elapsed_sec: float = 0.0,
+    error_type: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    """记录一次内容生成 LLM 调用的结果。仅在 ``_build_llm_node_texts`` 内部调用。"""
+    with _CONTENT_LLM_METRICS_LOCK:
+        _CONTENT_LLM_METRICS["calls"] += 1
+        if success:
+            _CONTENT_LLM_METRICS["success"] += 1
+        else:
+            _CONTENT_LLM_METRICS["failure"] += 1
+        if attempted:
+            _CONTENT_LLM_METRICS["attempted"] += 1
+        if fallback_reason:
+            bucket = _CONTENT_LLM_METRICS["fallback_by_reason"]
+            bucket[fallback_reason] = bucket.get(fallback_reason, 0) + 1
+        _CONTENT_LLM_METRICS["last_call"] = {
+            "success": success,
+            "fallback_reason": fallback_reason,
+            "attempted": attempted,
+            "prompt_chars": prompt_chars,
+            "elapsed_sec": elapsed_sec,
+            "error_type": error_type,
+            "error_message": error_message,
+        }
+
+
+def get_content_llm_metrics() -> dict[str, Any]:
+    """获取内容生成 LLM（④）的统计快照（线程安全）。"""
+    with _CONTENT_LLM_METRICS_LOCK:
+        return {
+            "calls": _CONTENT_LLM_METRICS["calls"],
+            "success": _CONTENT_LLM_METRICS["success"],
+            "failure": _CONTENT_LLM_METRICS["failure"],
+            "attempted": _CONTENT_LLM_METRICS["attempted"],
+            "fallback_by_reason": dict(_CONTENT_LLM_METRICS["fallback_by_reason"]),
+            "last_call": (
+                dict(_CONTENT_LLM_METRICS["last_call"])
+                if _CONTENT_LLM_METRICS["last_call"] is not None
+                else None
+            ),
+        }
+
+
+def reset_content_llm_metrics() -> None:
+    """清零内容生成 LLM（④）的统计。仅供测试使用。"""
+    with _CONTENT_LLM_METRICS_LOCK:
+        _CONTENT_LLM_METRICS["calls"] = 0
+        _CONTENT_LLM_METRICS["success"] = 0
+        _CONTENT_LLM_METRICS["failure"] = 0
+        _CONTENT_LLM_METRICS["attempted"] = 0
+        _CONTENT_LLM_METRICS["fallback_by_reason"] = {}
+        _CONTENT_LLM_METRICS["last_call"] = None
 
 # 同一个 event 的不同运行（automatic / targeted / 多平台组合）会写入同一个
 # ``{trace_dir}/{event_id}/``。为避免后一次运行静默覆盖前一次的证据，
@@ -426,6 +523,8 @@ def run_hot_event_evaluation(
     llm_client: Any | None = None,
     trace_dir: str | Path | None = None,
     dispatch_platform: str | None = None,
+    recall_size: int = 200,
+    recall_mode: Literal["platform_aware"] = "platform_aware",
 ) -> tuple[Path, dict[str, Any]]:
     events = load_hot_events(input_path)
     hot_event = select_hot_event(events, event_id=event_id)
@@ -449,6 +548,8 @@ def run_hot_event_evaluation(
         llm_client=llm_client,
         trace_dir=run_dirs.trace_dir,
         dispatch_platform=dispatch_platform,
+        recall_size=recall_size,
+        recall_mode=recall_mode,
     )
     return output_path, output_payload
 
@@ -471,6 +572,8 @@ def run_hot_event_evaluations(
     trace_dir: str | Path | None = None,
     target_user_id: str | None = None,
     dispatch_platform: str | None = None,
+    recall_size: int = 200,
+    recall_mode: Literal["platform_aware"] = "platform_aware",
 ) -> list[tuple[Path, dict[str, Any]]]:
     events = load_hot_events(input_path)
     selected_events = select_hot_events(
@@ -502,6 +605,8 @@ def run_hot_event_evaluations(
             trace_dir=run_dirs.trace_dir,
             target_user_id=target_user_id,
             dispatch_platform=dispatch_platform,
+            recall_size=recall_size,
+            recall_mode=recall_mode,
         )
         results.append((output_path, output_payload))
 
@@ -526,6 +631,8 @@ def run_hot_event_dict_evaluations(
     trace_dir: str | Path | None = None,
     target_user_id: str | None = None,
     dispatch_platform: str | None = None,
+    recall_size: int = 200,
+    recall_mode: Literal["platform_aware"] = "platform_aware",
 ) -> list[tuple[Path, dict[str, Any]]]:
     selected_events = select_hot_events(
         events,
@@ -556,6 +663,8 @@ def run_hot_event_dict_evaluations(
             trace_dir=run_dirs.trace_dir,
             target_user_id=target_user_id,
             dispatch_platform=dispatch_platform,
+            recall_size=recall_size,
+            recall_mode=recall_mode,
         )
         results.append((output_path, output_payload))
     return results
@@ -578,6 +687,8 @@ def run_hot_event_multiplatform_evaluations(
     use_llm: bool = True,
     llm_client: Any | None = None,
     trace_dir: str | Path | None = None,
+    recall_size: int = 200,
+    recall_mode: Literal["platform_aware"] = "platform_aware",
 ) -> list[tuple[Path, dict[str, Any]]]:
     """多平台并行分发入口。
 
@@ -620,6 +731,8 @@ def run_hot_event_multiplatform_evaluations(
             use_llm=use_llm,
             llm_client=llm_client,
             trace_dir=run_dirs.trace_dir,
+            recall_size=recall_size,
+            recall_mode=recall_mode,
         )
         results.append((output_path, output_payload))
     return results
@@ -640,6 +753,8 @@ def _run_hot_event_multiplatform_evaluation(
     use_llm: bool = True,
     llm_client: Any | None = None,
     trace_dir: str | Path,
+    recall_size: int = 200,
+    recall_mode: Literal["platform_aware"] = "platform_aware",
 ) -> tuple[Path, dict[str, Any], dict[str, float]]:
     root = Path(workspace_root)
     stage_times: dict[str, float] = {}
@@ -662,6 +777,9 @@ def _run_hot_event_multiplatform_evaluation(
     )
     stage_times["hot_event_to_payload"] = time.perf_counter() - t0
 
+    # 多平台分发：每个 platform_spec 自己有 platform_key，召回层无法做单平台
+    # platform_aware（否则会把其它平台的优质节点误删）。这里关闭 dispatch_platform
+    # 让召回覆盖所有候选平台，再交给 PlatformDispatcher 各自过滤。
     pipeline = StrategyPipeline(product_name="abc_reading")
     artifacts = pipeline.run_with_artifacts(
         workspace_root=root,
@@ -670,6 +788,8 @@ def _run_hot_event_multiplatform_evaluation(
         use_llm=use_llm,
         llm_client=client,
         target_user_id=None,
+        recall_size=recall_size,
+        recall_mode=recall_mode,
     )
     for key, value in artifacts.stage_times.items():
         stage_times[key] = value
@@ -2292,6 +2412,8 @@ def _run_hot_event_evaluation(
     trace_dir: str | Path,
     target_user_id: str | None = None,
     dispatch_platform: str | None = None,
+    recall_size: int = 200,
+    recall_mode: Literal["platform_aware"] = "platform_aware",
 ) -> tuple[Path, dict[str, Any], dict[str, float]]:
     root = Path(workspace_root)
     stage_times: dict[str, float] = {}
@@ -2314,6 +2436,19 @@ def _run_hot_event_evaluation(
     )
     stage_times["hot_event_to_payload"] = time.perf_counter() - t0
 
+    # 召回开关归一化：
+    #   1) 单人 target_user_id 是「强制唯一节点」，不存在候选池概念 → 关掉；
+    #   2) recall_size <= 0 → 视作关闭，统一归一成 None，
+    #      避免下游拿到 0 这种「半开」状态。
+    effective_recall_size = (
+        recall_size
+        if target_user_id is None and recall_mode and recall_size > 0
+        else None
+    )
+    effective_recall_mode = (
+        recall_mode if effective_recall_size is not None else None
+    )
+
     pipeline = StrategyPipeline(product_name="abc_reading")
     artifacts = pipeline.run_with_artifacts(
         workspace_root=root,
@@ -2323,6 +2458,8 @@ def _run_hot_event_evaluation(
         llm_client=client,
         target_user_id=target_user_id,
         dispatch_platform=dispatch_platform,
+        recall_size=effective_recall_size,
+        recall_mode=effective_recall_mode,
     )
     # 把 pipeline 子键展开成顶层键，便于压测面板直接拿 event_parser/feature_builder/...
     for key, value in artifacts.stage_times.items():
@@ -2391,9 +2528,16 @@ def _build_llm_node_texts(
         "base_url": None,
         "fallback_reason": None,
     }
+    started = time.monotonic()
 
     if not use_llm:
         metadata["fallback_reason"] = "llm_disabled"
+        _record_content_llm_outcome(
+            success=False,
+            fallback_reason="llm_disabled",
+            attempted=False,
+            elapsed_sec=time.monotonic() - started,
+        )
         return {}, metadata
 
     if strategy_result.selection_summary.selection_mode == "targeted":
@@ -2412,6 +2556,12 @@ def _build_llm_node_texts(
         ]
     if not eligible_nodes:
         metadata["fallback_reason"] = "no_eligible_nodes"
+        _record_content_llm_outcome(
+            success=False,
+            fallback_reason="no_eligible_nodes",
+            attempted=False,
+            elapsed_sec=time.monotonic() - started,
+        )
         return {}, metadata
 
     client = llm_client
@@ -2419,6 +2569,12 @@ def _build_llm_node_texts(
         client = OpenAICompatibleLLMClient.from_env_files(workspace_root)
     if client is None:
         metadata["fallback_reason"] = "llm_not_configured"
+        _record_content_llm_outcome(
+            success=False,
+            fallback_reason="llm_not_configured",
+            attempted=False,
+            elapsed_sec=time.monotonic() - started,
+        )
         return {}, metadata
 
     if hasattr(client, "describe"):
@@ -2447,6 +2603,9 @@ def _build_llm_node_texts(
         platform_for=platform_for,
     )
 
+    prompt_chars = len(system_prompt) + len(user_prompt)
+    call_started = time.monotonic()
+
     try:
         response = client.generate_json(
             system_prompt=system_prompt,
@@ -2454,6 +2613,23 @@ def _build_llm_node_texts(
         )
     except (LLMClientError, OSError, ValueError, TypeError) as exc:
         metadata["fallback_reason"] = f"llm_request_failed:{type(exc).__name__}"
+        _record_content_llm_outcome(
+            success=False,
+            fallback_reason=metadata["fallback_reason"],
+            attempted=True,
+            prompt_chars=prompt_chars,
+            elapsed_sec=time.monotonic() - call_started,
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+        )
+        logger.warning(
+            "eval_hot_events._build_llm_node_texts failed: "
+            "error_type=%s prompt_chars=%d elapsed_sec=%.3f error=%r",
+            type(exc).__name__,
+            prompt_chars,
+            time.monotonic() - call_started,
+            exc,
+        )
         return {}, metadata
 
     llm_nodes = _extract_llm_node_mapping(
@@ -2462,6 +2638,13 @@ def _build_llm_node_texts(
     )
     if not llm_nodes:
         metadata["fallback_reason"] = "invalid_llm_response"
+        _record_content_llm_outcome(
+            success=False,
+            fallback_reason="invalid_llm_response",
+            attempted=True,
+            prompt_chars=prompt_chars,
+            elapsed_sec=time.monotonic() - call_started,
+        )
         return {}, metadata
 
     overrides: dict[str, dict[str, str]] = {}
@@ -2473,10 +2656,32 @@ def _build_llm_node_texts(
         if cleaned:
             overrides[node.user_id] = cleaned
 
+    elapsed_sec = time.monotonic() - call_started
     if overrides:
         metadata["used"] = True
+        _record_content_llm_outcome(
+            success=True,
+            fallback_reason=None,
+            attempted=True,
+            prompt_chars=prompt_chars,
+            elapsed_sec=elapsed_sec,
+        )
+        logger.info(
+            "eval_hot_events._build_llm_node_texts success: "
+            "prompt_chars=%d elapsed_sec=%.3f nodes=%d",
+            prompt_chars,
+            elapsed_sec,
+            len(overrides),
+        )
     else:
         metadata["fallback_reason"] = "empty_llm_content"
+        _record_content_llm_outcome(
+            success=False,
+            fallback_reason="empty_llm_content",
+            attempted=True,
+            prompt_chars=prompt_chars,
+            elapsed_sec=elapsed_sec,
+        )
     return overrides, metadata
 
 
@@ -2886,6 +3091,34 @@ def _archive_previous_trace(*, event_dir: Path) -> Path | None:
     return archive_dir
 
 
+def _candidate_counts_view(summary: FeatureBuildSummary) -> dict[str, Any]:
+    """把召回口径翻译成人类可读的「召回 N / 全量 M」视图。
+
+    ``summary.node_count`` 在召回开启时是**召回人数**（如 200），不是全量
+    候选人数。展示 / 报告一律用这个视图，不要直接把 node_count 当全量用。
+    """
+    total = summary.total_candidate_count
+    if total is None:
+        # 老数据 / 直连 build_features 未填：退回 node_count，口径标记 unknown。
+        total = summary.node_count
+    recalled = (
+        summary.recall_size if summary.recall_mode is not None else summary.node_count
+    )
+    recall_enabled = summary.recall_mode is not None
+    return {
+        "candidate_pool_total": total,
+        "candidate_pool_used": recalled,
+        "recall_enabled": recall_enabled,
+        "recall_mode": summary.recall_mode,
+        # 人类可读口径，例如 "召回 200 / 全量 35636"
+        "display_text": (
+            f"召回 {recalled} / 全量 {total}"
+            if recall_enabled and recalled != total
+            else f"全量 {total}"
+        ),
+    }
+
+
 def _write_pipeline_trace(
     *,
     trace_dir: str | Path,
@@ -2935,6 +3168,12 @@ def _write_pipeline_trace(
         {
             "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             "summary": artifacts.feature_result.summary.model_dump(mode="json"),
+            # 显式展示口径：summary.node_count 在召回开启时是「召回人数」，
+            # 不是全量人数。这里单独给出两个数字，避免读 trace 的人把 200
+            # 误读成全量候选规模。
+            "candidate_counts": _candidate_counts_view(
+                artifacts.feature_result.summary
+            ),
             "event_keywords": {
                 "event_title": artifacts.event.event_title,
                 "extracted_keywords": artifacts.event.extracted_keywords,
