@@ -15,7 +15,8 @@
   dev  : also start vite dev server, open http://127.0.0.1:5173
 
 .PARAMETER PythonExe
-  Path of the Python interpreter, default: <project>\.venv\Scripts\python.exe
+  Path of the Python interpreter. Default resolution order:
+  <project>\.venv\Scripts\python.exe -> D:\python\python.exe -> python (PATH)
 
 .PARAMETER Port
   uvicorn port, default 8000
@@ -43,13 +44,26 @@ Set-Location $ProjectRoot
 Write-Host "[1/5] Project root: $ProjectRoot" -ForegroundColor Cyan
 
 # 2. Check the Python interpreter
-# 默认用项目自带的 venv；$PSScriptRoot 在 [CmdletBinding()] 脚本的
-# param 默认值里为空，所以必须在这里（脚本体内）解析。
+# 依次尝试：显式传入 → 项目 .venv → 已装好依赖的系统 Python → PATH 里的 python。
+#
+# 只认 .venv 这一个默认值会让没建过 venv 的机器必然启动失败：本项目目前就没有
+# .venv，依赖装在 D:\python 下。所以改成逐级回退 —— 有 venv 的机器照旧用 venv，
+# 没有的机器自动退到系统 Python，两边都能一键启动。
 if (-not $PythonExe) {
-    $PythonExe = Join-Path $ProjectRoot '.venv\Scripts\python.exe'
+    $candidates = @(
+        (Join-Path $ProjectRoot '.venv\Scripts\python.exe'),
+        'D:\python\python.exe',
+        'python'
+    )
+    foreach ($candidate in $candidates) {
+        if (Get-Command $candidate -ErrorAction SilentlyContinue) {
+            $PythonExe = $candidate
+            break
+        }
+    }
 }
-if (-not (Test-Path $PythonExe)) {
-    throw "Python interpreter not found: $PythonExe (pass -PythonExe <path>)"
+if (-not $PythonExe) {
+    throw "Python interpreter not found (pass -PythonExe <path>)"
 }
 $pyVersion = & $PythonExe --version 2>&1
 Write-Host "[2/5] Python: $pyVersion" -ForegroundColor Cyan

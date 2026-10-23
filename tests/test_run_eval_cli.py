@@ -80,9 +80,14 @@ def _write_minimal_workspace(root: Path, *, node_count: int = 4) -> None:
             "user_name": f"reading_node_{index}",
             "user_followers": 2400 - index * 200,
             "user_friends": 80 + index,
-            "user_interests": ["reading", "parenting", "english", "education"],
+            # 兴趣 / 简介用中文：真实档案（data/derived/
+            # weibo_profile_reworked_readable.jsonl）的 user_interests 本就是中文字段，
+            # 而事件关键词同样来自中文标题 —— 两者语言一致才可能命中。这里若沿用
+            # 英文标签，关键词匹配必然为 0，所有节点都会被 semantic gate 判否，
+            # "指定平台后选人受限于该平台"也就无从验证。
+            "user_interests": ["亲子共读", "英语启蒙", "阅读", "教育"],
             "user_description": (
-                "Focus on parent-child reading and early English learning practice."
+                "专注亲子共读与英语启蒙，分享陪读经验和分级阅读书单。"
             ),
             "platform": simulated_platforms[(index - 1) % len(simulated_platforms)],
         }

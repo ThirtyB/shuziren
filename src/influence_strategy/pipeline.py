@@ -13,6 +13,20 @@ from .scorer import Scorer
 from .selector import Selector
 from .strategy_generator import StrategyGenerator
 
+# 大模型职责边界：**默认全链路不调用任何大模型**（本地部署，不依赖第三方 API）。
+#
+# 原先四个 LLM 环节现在分别由本地能力承担：
+#   - 事件解析 → 规则解析（``RuleBasedEventParser``），关键词/标签全部由规则产出；
+#   - 特征打分 → 本地语义模型（jieba + TF-IDF + SVD，见 ``local_semantic``）；
+#   - 选人     → 规则选人 + 图结构传播潜力（见 ``graph_features``）；
+#   - 文案输出 → 占位文本（见 ``eval_hot_events`` 里的占位逻辑）。
+#
+# 三个开关默认全关。若要把某个环节接回大模型，把对应常量改回 True 即可
+# （仍需要配置 API Key；不配置时会自动退化为本地逻辑）。
+LLM_IN_EVENT_PARSER = False
+LLM_IN_FEATURE_BUILDER = False
+LLM_IN_SELECTOR = False
+
 
 @dataclass(slots=True)
 class PipelineArtifacts:
@@ -83,7 +97,8 @@ class StrategyPipeline:
         event = self.event_parser.parse(
             event_input,
             workspace_root=workspace_root,
-            use_llm=use_llm,
+            # 事件解析改为纯规则（见 LLM_IN_EVENT_PARSER）。
+            use_llm=LLM_IN_EVENT_PARSER,
             llm_client=client,
         )
         stage_times["event_parser"] = time.perf_counter() - t0
@@ -93,7 +108,8 @@ class StrategyPipeline:
             workspace_root=workspace_root,
             event=event,
             profile_limit=profile_limit,
-            use_llm=use_llm,
+            # 特征打分不再询问大模型（见 LLM_IN_FEATURE_BUILDER）。
+            use_llm=LLM_IN_FEATURE_BUILDER,
             llm_client=client,
             recall_size=recall_size,
             recall_mode=recall_mode,
@@ -109,7 +125,8 @@ class StrategyPipeline:
         selection_result = self.selector.select(
             score_result,
             workspace_root=workspace_root,
-            use_llm=use_llm,
+            # 选人不再询问大模型（见 LLM_IN_SELECTOR）。
+            use_llm=LLM_IN_SELECTOR,
             llm_client=client,
             target_user_id=target_user_id,
             dispatch_platform=dispatch_platform,

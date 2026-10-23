@@ -7,6 +7,7 @@ import { Topbar } from "../components/Topbar";
 import { BenchmarkHistoryPanel } from "../components/BenchmarkHistoryPanel";
 import { BenchmarkDetailPanel } from "../components/BenchmarkDetailPanel";
 import { BenchmarkScenario } from "../scenarios/BenchmarkScenario";
+import { LlmLatencyPanel } from "../components/LlmLatencyPanel";
 
 /**
  * 测试控制台：一键 N 轮压测（默认 5）。
@@ -148,6 +149,10 @@ export default function TestingRoute() {
           <div className="sub-section batch-eval-section">
             <h3>一键压测</h3>
             <BenchmarkScenario {...sharedScenarioProps} onStarted={handleStarted} />
+          </div>
+          <div className="sub-section llm-latency-section">
+            <h3>大模型响应延迟</h3>
+            <LlmLatencyPanel />
           </div>
           {notice && <div className="message">{notice}</div>}
         </section>

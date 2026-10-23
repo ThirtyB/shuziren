@@ -1787,3 +1787,86 @@ details pre {
     max-height: none;
   }
 }
+
+/* === 大模型响应延迟测试 === */
+.llm-latency-panel {
+  gap: 10px;
+}
+
+.llm-latency-result {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid #e3e9ee;
+  padding-top: 10px;
+  margin-top: 4px;
+}
+
+.llm-latency-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.llm-latency-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.llm-latency-stats > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: #f6fbf9;
+  border: 1px solid #cfe4dd;
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+
+.llm-latency-stats span {
+  font-size: 11px;
+  color: #617080;
+}
+
+.llm-latency-stats strong {
+  font-size: 15px;
+  color: #10212f;
+  font-family: Consolas, "SFMono-Regular", monospace;
+}
+
+.llm-latency-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.llm-latency-table th,
+.llm-latency-table td {
+  border-bottom: 1px solid #e3e9ee;
+  padding: 5px 6px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.llm-latency-table th {
+  color: #617080;
+  font-weight: 600;
+  font-size: 11px;
+}
+
+.llm-latency-table td.preview {
+  color: #465767;
+  line-height: 1.45;
+}
+
+.llm-latency-table tr.failed td {
+  color: #991b1b;
+}
+
+@media (max-width: 1100px) {
+  .llm-latency-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

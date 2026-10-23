@@ -216,3 +216,69 @@ export type BenchmarkHistoryItem = {
   output_dir: string;
   error: string | null;
 };
+
+/* ---------------- LLM 往返延迟测试 ----------------
+ *
+ * 和压测的区别：压测跑完整策略管线，这里只把库里的一条话题交给大模型生成文案，
+ * 计时就是"发出请求 → 收到响应"，用于单独观察大模型的响应速度。
+ */
+
+export type LlmLatencyRequest = {
+  iterations?: number;
+  /** 不传则每次随机抽一条话题；传了则锁定同一条话题跑 N 次。 */
+  event_id?: string | null;
+  label?: string | null;
+};
+
+/** 单次"话题 → 文案"调用的计时结果。 */
+export type LlmLatencyCall = {
+  index: number;
+  ok: boolean;
+  /** 往返耗时（秒）：从请求发出到拿到解析后的 JSON。 */
+  elapsed_seconds: number;
+  event_id: string | null;
+  event_title: string | null;
+  prompt_chars: number;
+  response_chars: number;
+  /** 模型生成的文案正文预览（后端截断到 120 字）。 */
+  preview: string;
+  error: string | null;
+};
+
+export type LlmLatencySummary = {
+  count: number;
+  avg_seconds: number;
+  min_seconds: number;
+  max_seconds: number;
+  total_seconds: number;
+};
+
+export type LlmLatencyResponse = {
+  latency_id: string;
+  label: string | null;
+  state: BenchmarkState;
+  iterations: number;
+  completed: number;
+  failed: number;
+  calls: LlmLatencyCall[];
+  summary: LlmLatencySummary | null;
+  /** 实际调用的大模型，便于确认这一组数据测的是哪个模型。 */
+  provider?: string | null;
+  model?: string | null;
+  created_at: string;
+  updated_at: string;
+  error?: string | null;
+};
+
+/** 历史列表条目：``GET /api/llm-latency`` 返回的轻量结构。 */
+export type LlmLatencyHistoryItem = {
+  latency_id: string;
+  label: string | null;
+  state: BenchmarkState;
+  iterations: number;
+  completed: number;
+  failed: number;
+  avg_seconds: number | null;
+  created_at: string;
+  updated_at: string;
+};

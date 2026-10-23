@@ -9,6 +9,12 @@ description = "Lightweight baseline modules for influence event distribution str
 readme = "README.md"
 requires-python = ">=3.11"
 
+[project.optional-dependencies]
+# 图像事件输入的本地 OCR（纯 ONNX，不需要 GPU，也不依赖任何大模型）。
+# 未安装时图像识别会返回 method="unrecognized" 而不是报错中断。
+#   pip install -e ".[ocr]"
+ocr = ["rapidocr_onnxruntime>=1.4", "Pillow>=10"]
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 

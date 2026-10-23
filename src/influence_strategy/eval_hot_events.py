@@ -42,6 +42,14 @@ from .strategy_generator import StrategyGenerator
 
 TRACE_PREVIEW_LIMIT = 25
 
+#: 文案生成是否调用大模型。默认关闭 —— 本地部署不依赖第三方 API，正文改用规则
+#: 生成的占位文本（``_fallback_node_content``）。占位文本已带话题、角色与表达
+#: 风格，足够撑起动作清单与下游结构，只是不具备真正的创作性。
+#:
+#: 需要恢复时把它改回 True 并配置 API Key；关闭状态下 ``_build_llm_node_texts``
+#: 会立刻返回空 dict（``fallback_reason="llm_disabled"``），不产生任何网络请求。
+CONTENT_LLM_ENABLED = False
+
 logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
@@ -812,7 +820,8 @@ def _run_hot_event_multiplatform_evaluation(
         dispatch_result=dispatch_result,
         score_result=artifacts.score_result,
         workspace_root=root,
-        use_llm=use_llm,
+        # 文案生成不再调用大模型（见 CONTENT_LLM_ENABLED），改走规则占位文本。
+        use_llm=CONTENT_LLM_ENABLED,
         llm_client=client,
     )
     stage_times["content_generation"] = time.perf_counter() - t0
@@ -2470,7 +2479,8 @@ def _run_hot_event_evaluation(
         hot_event=hot_event,
         strategy_result=artifacts.strategy_result,
         workspace_root=root,
-        use_llm=use_llm,
+        # 文案生成不再调用大模型（见 CONTENT_LLM_ENABLED），改走规则占位文本。
+        use_llm=CONTENT_LLM_ENABLED,
         llm_client=client,
     )
     stage_times["content_generation"] = time.perf_counter() - t0
@@ -2485,11 +2495,10 @@ def _run_hot_event_evaluation(
     )
     stage_times["write_output"] = time.perf_counter() - t0
 
-    # run_label 同时透传选人状态：targeted / ok / manual_required / no_eligible_nodes
-    if target_user_id:
-        run_label_value = "targeted"
-    else:
-        run_label_value = artifacts.strategy_result.summary.status
+    # run_label 只表示**运行模式**（automatic / targeted），不再复用它透传选人结果；
+    # 选人状态单独写进 selection_status，二者职责分开。
+    run_label_value = "targeted" if target_user_id else "automatic"
+    selection_status = artifacts.strategy_result.summary.status
     t0 = time.perf_counter()
     _write_pipeline_trace(
         trace_dir=trace_dir,
@@ -2500,6 +2509,7 @@ def _run_hot_event_evaluation(
         output_path=output_path,
         content_llm_meta=content_llm_meta,
         run_label=run_label_value,
+        selection_status=selection_status,
     )
     stage_times["write_trace"] = time.perf_counter() - t0
 
@@ -3129,6 +3139,7 @@ def _write_pipeline_trace(
     output_path: Path,
     content_llm_meta: dict[str, Any] | None = None,
     run_label: str | None = None,
+    selection_status: str | None = None,
 ) -> None:
     # trace_dir 由调用方（评估入口 / 运行目录分配）显式给出，恒为本次运行的
     # trace 目录（默认 ``<运行目录>/trace/``），因此不会再写入独立的旧目录。
@@ -3241,6 +3252,7 @@ def _write_pipeline_trace(
         {
             "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             "run_label": run_label,
+            "selection_status": selection_status,
             "final_output_path": str(output_path),
             "previous_run_archive": archived_dir.name if archived_dir else None,
             "payload": final_output,

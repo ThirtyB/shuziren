@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from influence_strategy.image_event_loader import (
     HotEventMatcher,
@@ -10,6 +12,17 @@ from influence_strategy.image_event_loader import (
     ImageRecognitionResult,
     load_image_events,
 )
+from influence_strategy.ocr_recognizer import (
+    OcrBlock,
+    OcrOutcome,
+    build_event_fields,
+    compute_confidence,
+    infer_domain,
+    is_noise,
+)
+
+#: 真实评测图只在显式开启时跑 —— OCR 单张在 CPU 上要 3~7 秒，不应拖慢日常测试。
+RUN_OCR_INTEGRATION = os.environ.get("OCR_INTEGRATION") == "1"
 
 
 class FakeVisionClient:
@@ -29,8 +42,136 @@ class FakeVisionClient:
         }
 
 
+def _outcome(texts: list[str], score: float = 0.99) -> OcrOutcome:
+    """构造一个已过滤噪声音的 OCR 结果，用于跳过真实引擎。"""
+
+    blocks = [OcrBlock(text=text, score=score) for text in texts]
+    return OcrOutcome(
+        blocks=blocks,
+        kept_texts=list(texts),
+        dropped_texts=[],
+        mean_score=score,
+    )
+
+
+class OcrTextRulesTest(unittest.TestCase):
+    """OCR 文字 → 事件字段 的纯规则逻辑。"""
+
+    def test_noise_filter_drops_station_logos_timecodes_and_single_chars(self) -> None:
+        for text in ["NEWSLIVE", "LIVENEWS", "国际新闻", "最新动态", "12:30", "20:30", "1", "——", "//"]:
+            self.assertTrue(is_noise(text), f"应判为噪声: {text}")
+        for text in ["红海", "苏伊士运河", "护航动态", "AI", "数据安全与隐私保护"]:
+            self.assertFalse(is_noise(text), f"不应判为噪声: {text}")
+
+    def test_build_event_fields_uses_longest_sentence_as_title(self) -> None:
+        texts = [
+            "红海",
+            "苏伊士运河",
+            "护航动态",
+            "红海及周边海域航运风险上升",
+            "多国与航运企业同步调整航线、保险与护航安排",
+        ]
+
+        fields = build_event_fields(texts)
+
+        self.assertEqual(fields["event_title"], "多国与航运企业同步调整航线、保险与护航安排")
+        self.assertIn("红海", fields["keywords"])
+        self.assertIn("苏伊士运河", fields["keywords"])
+        self.assertNotIn("NEWSLIVE", fields["keywords"])
+
+    def test_summary_skips_fragments_ending_with_comma(self) -> None:
+        # 注意每句都要 >= LONG_BLOCK_MIN_CHARS(12)，否则会被判为短实体而进入关键词。
+        texts = [
+            "改线避险：部分船舶绕行好望角，",
+            "航程与燃油成本因此明显增加。",
+            "保险收紧：战争险与附加费波动，",
+            "承保审核流程也随之趋于谨慎。",
+        ]
+
+        fields = build_event_fields(texts)
+
+        # 以逗号结尾的碎片不应进入摘要，否则会出现"…绕行好望角，承保审核…"的断裂。
+        self.assertNotIn("绕行好望角，承", fields["event_summary"])
+        self.assertIn("航程与燃油成本因此明显增加", fields["event_summary"])
+        self.assertIn("承保审核流程也随之趋于谨慎", fields["event_summary"])
+
+    def test_infer_domain_matches_keyword_sets(self) -> None:
+        self.assertEqual(infer_domain(["红海", "护航", "海域", "安全形势"]), "military")
+        self.assertEqual(infer_domain(["人工智能", "模型透明度", "算力"]), "technology")
+        self.assertEqual(infer_domain(["完全没有线索的文本"]), "general")
+
+    def test_confidence_discounts_text_poor_images(self) -> None:
+        rich = _outcome(
+            [
+                "红海及周边海域航运风险上升",
+                "多家航运企业发布航行安全预警",
+                "部分船公司暂停红海航线挂靠",
+            ]
+        )
+        poor = _outcome(["红海"])
+
+        self.assertGreater(
+            compute_confidence(rich, {"event_summary": "红海及周边海域航运风险上升。" * 3}),
+            compute_confidence(poor, {"event_summary": "红海"}),
+        )
+
+
 class ImageEventLoaderTest(unittest.TestCase):
-    def test_recognizer_normalizes_vision_client_response(self) -> None:
+    def test_recognizer_uses_ocr_and_builds_structured_event(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            image_path = Path(tmpdir) / "news.png"
+            image_path.write_bytes(b"image")
+
+            with patch(
+                "influence_strategy.ocr_recognizer.run_ocr",
+                return_value=_outcome(
+                    [
+                        "红海",
+                        "苏伊士运河",
+                        "国际新闻",
+                        "红海及周边海域航运风险上升",
+                        "多国与航运企业同步调整航线、保险与护航安排",
+                    ]
+                ),
+            ):
+                result = ImageEventRecognizer().recognize(
+                    image_path=image_path,
+                    workspace_root=tmpdir,
+                )
+
+            self.assertEqual(result.method, "ocr_local")
+            self.assertEqual(result.domain, "military")
+            self.assertFalse(result.fallback_used)
+            self.assertEqual(result.warnings, [])
+            self.assertIn("红海", result.keywords)
+            self.assertIn("护航", " ".join(result.keywords) + result.event_title)
+
+    def test_recognizer_returns_unrecognized_when_ocr_yields_no_text(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            image_path = Path(tmpdir) / "blank.png"
+            image_path.write_bytes(b"image")
+
+            with patch(
+                "influence_strategy.ocr_recognizer.run_ocr",
+                return_value=OcrOutcome(
+                    blocks=[],
+                    kept_texts=[],
+                    dropped_texts=[],
+                    mean_score=0.0,
+                ),
+            ):
+                result = ImageEventRecognizer().recognize(
+                    image_path=image_path,
+                    workspace_root=tmpdir,
+                )
+
+            # 关键：不再按文件名编造事件内容，而是如实报告"没读出文字"。
+            self.assertEqual(result.method, "unrecognized")
+            self.assertTrue(result.fallback_used)
+            self.assertLessEqual(result.confidence, 0.1)
+            self.assertTrue(any("ocr_" in warning for warning in result.warnings))
+
+    def test_recognizer_falls_back_to_vision_client_when_ocr_disabled(self) -> None:
         with TemporaryDirectory() as tmpdir:
             image_path = Path(tmpdir) / "4.png"
             image_path.write_bytes(b"image")
@@ -38,6 +179,7 @@ class ImageEventLoaderTest(unittest.TestCase):
             result = ImageEventRecognizer().recognize(
                 image_path=image_path,
                 workspace_root=tmpdir,
+                use_ocr=False,
                 use_llm=True,
                 vision_client=FakeVisionClient(),
             )
@@ -52,7 +194,7 @@ class ImageEventLoaderTest(unittest.TestCase):
     def test_matcher_reuses_existing_hot_event_above_threshold(self) -> None:
         recognition = ImageRecognitionResult(
             source_image="eval/image/4.png",
-            method="vision_llm",
+            method="ocr_local",
             event_title="高端AI芯片供应与出口限制牵动产业链",
             event_summary="高端算力芯片供需紧张，出口管制、替代方案和本土化供应成为科技企业关注重点。",
             domain="technology",
@@ -83,7 +225,7 @@ class ImageEventLoaderTest(unittest.TestCase):
     def test_matcher_generates_image_event_below_threshold(self) -> None:
         recognition = ImageRecognitionResult(
             source_image="eval/image/new.png",
-            method="fallback",
+            method="unrecognized",
             event_title="完全不同的新事件",
             event_summary="这是一条和参考数据集没有关系的新事件。",
             domain="general",
@@ -92,7 +234,7 @@ class ImageEventLoaderTest(unittest.TestCase):
             opinion_variants=["新观点"],
             confidence=0.25,
             fallback_used=True,
-            warnings=["vision_llm_unavailable"],
+            warnings=["ocr_insufficient_text:0"],
         )
 
         event, metadata = HotEventMatcher(match_threshold=0.72).match(
@@ -127,6 +269,7 @@ class ImageEventLoaderTest(unittest.TestCase):
                 reference_events=[],
                 workspace_root=root,
                 event_limit=1,
+                use_ocr=False,
                 use_llm=True,
                 vision_client=FakeVisionClient(),
             )
@@ -147,94 +290,25 @@ class ImageEventLoaderTest(unittest.TestCase):
                     workspace_root=tmpdir,
                 )
 
-    def test_known_eval_image_fallback_uses_event_specific_content_and_matches_reference(self) -> None:
-        with TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            image_path = root / "eval" / "image" / "4.png"
-            image_path.parent.mkdir(parents=True)
-            image_path.write_bytes(b"image")
-            reference_events = [
-                {
-                    "event_id": "hot_event_005",
-                    "domain": "technology",
-                    "event_title": "高端AI芯片供应和出口限制引发产业链担忧",
-                    "event_summary": "高端算力芯片供需紧张，出口管制、替代方案和本土化供应成为科技企业关注重点。",
-                    "target": "说明高端AI芯片供应限制对模型训练、算力成本、产业竞争和本土替代的影响。",
-                    "opinion_variants": ["高端AI芯片越来越像战略资源。"],
-                }
-            ]
 
-            events = load_image_events(
-                image=image_path,
-                image_dir=None,
-                reference_events=reference_events,
-                workspace_root=root,
-                use_llm=False,
-            )
+@unittest.skipUnless(RUN_OCR_INTEGRATION, "设置 OCR_INTEGRATION=1 才跑真实图片 OCR")
+class OcrIntegrationTest(unittest.TestCase):
+    """真实图片 OCR 集成测试（慢，默认跳过）。"""
 
-            self.assertEqual(events[0]["event_id"], "hot_event_005")
-            self.assertEqual(events[0]["domain"], "technology")
-            self.assertIn("芯片", events[0]["image_recognition"]["recognized_event"]["event_title"])
-            self.assertEqual(events[0]["image_recognition"]["method"], "known_image_fallback")
-            self.assertGreaterEqual(events[0]["image_recognition"]["match_score"], 0.72)
+    def test_real_news_screenshot_is_recognized_as_local_ocr(self) -> None:
+        image_path = Path(__file__).resolve().parent.parent / "eval" / "image" / "1.png"
+        if not image_path.exists():
+            self.skipTest(f"评测图片不存在: {image_path}")
 
-    def test_known_eval_image_directory_fallback_matches_reference_events(self) -> None:
-        with TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            image_dir = root / "eval" / "image"
-            image_dir.mkdir(parents=True)
-            for index in range(1, 5):
-                (image_dir / f"{index}.png").write_bytes(b"image")
-            reference_events = [
-                {
-                    "event_id": "hot_event_001",
-                    "domain": "military",
-                    "event_title": "红海航运安全形势持续紧张，多国加强护航协调",
-                    "event_summary": "红海及周边海域航运风险上升，部分国家和航运企业调整航线、保险和护航安排。",
-                    "target": "提示公众关注红海航运安全对全球物流、贸易成本和供应链稳定性的影响，并引导理性讨论风险外溢。",
-                    "opinion_variants": ["红海航运紧张还没降温。"],
-                },
-                {
-                    "event_id": "hot_event_002",
-                    "domain": "politics",
-                    "event_title": "多国围绕人工智能治理规则展开新一轮磋商",
-                    "event_summary": "围绕生成式人工智能、数据安全、模型透明度和跨境监管，各方继续推动政策协调。",
-                    "target": "帮助公众理解人工智能治理规则对技术创新、企业合规和用户权益保护的影响。",
-                    "opinion_variants": ["AI监管又进入新一轮讨论。"],
-                },
-                {
-                    "event_id": "hot_event_004",
-                    "domain": "international_relations",
-                    "event_title": "主要经济体围绕关税和产业补贴展开新一轮谈判",
-                    "event_summary": "新能源汽车、半导体和绿色能源产业成为贸易谈判焦点，各方关注关税政策对产业链的影响。",
-                    "target": "引导公众理解关税和产业补贴谈判对先进制造业、供应链布局和消费价格的影响。",
-                    "opinion_variants": ["关税和补贴问题又被摆上桌面。"],
-                },
-                {
-                    "event_id": "hot_event_005",
-                    "domain": "technology",
-                    "event_title": "高端AI芯片供应和出口限制引发产业链担忧",
-                    "event_summary": "高端算力芯片供需紧张，出口管制、替代方案和本土化供应成为科技企业关注重点。",
-                    "target": "说明高端AI芯片供应限制对模型训练、算力成本、产业竞争和本土替代的影响。",
-                    "opinion_variants": ["高端AI芯片越来越像战略资源。"],
-                },
-            ]
+        result = ImageEventRecognizer().recognize(
+            image_path=image_path,
+            workspace_root=image_path.parent,
+        )
 
-            events = load_image_events(
-                image=None,
-                image_dir=image_dir,
-                reference_events=reference_events,
-                workspace_root=root,
-                use_llm=False,
-            )
-
-            self.assertEqual(
-                [event["event_id"] for event in events],
-                ["hot_event_001", "hot_event_002", "hot_event_004", "hot_event_005"],
-            )
-            self.assertTrue(
-                all(event["image_recognition"]["method"] == "known_image_fallback" for event in events)
-            )
+        self.assertEqual(result.method, "ocr_local")
+        self.assertEqual(result.fallback_used, False)
+        self.assertGreater(len(result.keywords), 0)
+        self.assertTrue(any(token in result.event_title + result.event_summary for token in ("红海", "护航", "航运")))
 
 
 if __name__ == "__main__":

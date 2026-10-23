@@ -75,6 +75,14 @@ eval/.cache/
 *.pyc
 .ipynb_checkpoints/
 
+# 本地模型预计算产物（BGE 索引约 64MB），由 scripts/build_local_models.py 生成。
+# 属于可由原始数据重建的派生物，不入库；换机器后跑一次预计算即可。
+data/derived/local_models/
+
+# BGE 句向量模型权重（约 183MB），由 scripts/download_bge.py 下载。
+# 不入库；换机器后先跑下载脚本，再跑预计算。
+data/models/
+
 # 临时诊断/分析脚本的运行产物（脚本本体为 _*.py，产物目录形如 _xxx_out/、_xxx_after/）。
 # 它们是一次性排查用的，用完即删；加在这里是为了不让它们污染 git status。
 /_*_out/

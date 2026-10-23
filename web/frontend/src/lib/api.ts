@@ -4,6 +4,9 @@ import type {
   BenchmarkHistoryItem,
   BenchmarkRequest,
   BenchmarkResponse,
+  LlmLatencyHistoryItem,
+  LlmLatencyRequest,
+  LlmLatencyResponse,
   RunStatus,
   SystemEventListResponse,
 } from "../types";
@@ -92,14 +95,14 @@ export async function deleteRun(runId: string): Promise<void> {
 }
 
 /**
- * 多模态图像事件输入：把图片上传到 ``/api/runs/image``，由后端视觉 LLM
- * （``VISION_LLM_MODEL``，默认 ``qwen3-vl-flash``）识别出 ``event_title /
+ * 多模态图像事件输入：把图片上传到 ``/api/runs/image``，由后端**本地 OCR**
+ * （RapidOCR）读取图片上的文字，再用规则提取出 ``event_title /
  * event_summary / domain / keywords / target / opinion_variants``，再走
- * 与文本事件完全相同的策略生成管线。
+ * 与文本事件完全相同的策略生成管线。全程不调用大模型。
  *
- * 视觉模型不可用时后端会回退到 ``image_event_loader._fallback_result``，
- * 前端这边只负责提交文件；识别结果（match_score / fallback_used）由详情
- * 面板展示，不需要前端做二次判断。
+ * 图片里读不出文字时后端返回 ``method="unrecognized"`` 的低置信度结果
+ * （而非编造事件内容），``warnings`` 会带 ``ocr_*`` 前缀说明原因。前端这边
+ * 只负责提交文件；识别结果（match_score / fallback_used）由详情面板展示。
  */
 export async function runImageEvent(
   image: File,
@@ -144,6 +147,38 @@ export async function listBenchmarks(): Promise<BenchmarkHistoryItem[]> {
 
 export async function deleteBenchmark(benchmarkId: string): Promise<void> {
   const response = await fetch(`/api/benchmarks/${encodeURIComponent(benchmarkId)}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    throw new Error(await readError(response));
+  }
+}
+
+/**
+ * 提交一次 LLM 往返延迟测试：后端异步执行，这里只拿到 queued 与
+ * ``latency_id``；每次调用的耗时靠 ``getLlmLatency`` 轮询。
+ */
+export async function runLlmLatency(
+  request: LlmLatencyRequest,
+): Promise<LlmLatencyResponse> {
+  return postJson<LlmLatencyResponse>("/api/llm-latency", request);
+}
+
+/** 轮询单条延迟测试：每次调用的耗时、用到的话题、生成的文案预览。 */
+export async function getLlmLatency(latencyId: string): Promise<LlmLatencyResponse> {
+  return fetchJson<LlmLatencyResponse>(
+    `/api/llm-latency/${encodeURIComponent(latencyId)}`,
+  );
+}
+
+/** LLM 延迟测试的历史列表（与压测历史隔离）。 */
+export async function listLlmLatency(): Promise<LlmLatencyHistoryItem[]> {
+  const payload = await fetchJson<{ items: LlmLatencyHistoryItem[] }>("/api/llm-latency");
+  return payload.items ?? [];
+}
+
+export async function deleteLlmLatency(latencyId: string): Promise<void> {
+  const response = await fetch(`/api/llm-latency/${encodeURIComponent(latencyId)}`, {
     method: "DELETE",
   });
   if (!response.ok) {

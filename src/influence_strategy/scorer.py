@@ -9,6 +9,26 @@ def _clip_score(value: float) -> float:
     return max(0.0, min(1.0, value))
 
 
+#: 图结构传播潜力对 diffusion 信号的**增量**上限。
+#: 用「加法增量」而不是「加权混合」：没有模型产物时 graph_potential 恒为 0，
+#: 加法形式让公式逐字等同于原版，历史结果与既有测试不受任何影响；有产物时
+#: 最多再加 0.35，代表"处在互动密集社群中心"带来的额外传播能力。
+DIFFUSION_GRAPH_BONUS = 0.35
+
+#: 本地语义**分位数**门槛（0~1，1 表示最相关）。
+#:
+#: 为什么用分位数而不是余弦绝对值：BGE 的余弦 p50≈0.30、p95≈0.43，而 SVD 的
+#: p95 才≈0.11 —— 同一个绝对阈值（如 0.12）在 BGE 下会放行 100% 的节点、在 SVD
+#: 下只放行 5%，完全不可移植。分位数则恒定表示「是否进入本次事件的前 N%」：
+#: low 放行约 10%（3.5 万节点即 3500+ 候选，足够选人）、medium 5%、high 2%，
+#: 风险越高要求语义越靠前。
+_LOCAL_SEMANTIC_THRESHOLD = {
+    "low": 0.90,
+    "medium": 0.95,
+    "high": 0.98,
+}
+
+
 class Scorer:
     def score(self, feature_result: FeatureBuildResult) -> ScoreResult:
         risk_limit = self._risk_limit(feature_result.event.constraints.risk_level)
@@ -19,12 +39,20 @@ class Scorer:
         for feature in feature_result.node_features:
             risk_flags, risk_score = self._compute_risk(feature)
             semantic_gate = self._semantic_gate(feature_result.event.constraints.risk_level, feature)
+            # diffusion 信号 = 节点自身互动表现 + 图结构传播潜力（增量）。
+            # 后者由 GraphFeatureBuilder 预计算（SGC 邻居传播 + PageRank 等），
+            # 补上"粉丝不多但处在互动密集社群中心"这类单看计数拿不到的信息。
+            diffusion_signal = _clip_score(
+                feature.diffusion_score + DIFFUSION_GRAPH_BONUS * feature.graph_potential
+            )
             raw_dispatch_score = _clip_score(
                 dispatch_weights["influence"] * feature.influence_score
-                + dispatch_weights["diffusion"] * feature.diffusion_score
+                + dispatch_weights["diffusion"] * diffusion_signal
                 + dispatch_weights["topic"] * feature.topic_match_score
                 + dispatch_weights["stability"] * feature.stability_score
-                + dispatch_weights["semantic"] * feature.llm_feature_score
+                # 语义项改用本地模型分：LLM 关闭后 llm_feature_score 恒为 0，
+                # 而这部分权重最高可占 0.45，空着等于整条打分链路丢掉近半信号。
+                + dispatch_weights["semantic"] * feature.local_semantic_score
             )
             final_score = _clip_score(raw_dispatch_score * (1 - risk_penalty_factor * risk_score))
             risk_level = self._risk_level(risk_score)
@@ -242,7 +270,17 @@ class Scorer:
         return mapping.get(risk_level, 0.50)
 
     def _semantic_gate(self, risk_level: str, feature: NodeFeature) -> bool:
-        base_match = feature.keyword_hit_count > 0 or feature.topic_match_score > 0.0
+        # 本地语义分是关键词/话题字面匹配之外的新通道：换了说法描述同一话题
+        # （「亲子共读」vs「陪孩子读绘本」）时字面命中可能为 0，但语义向量仍然接近。
+        # 这正是原来由 LLM 判断、现在交给本地模型承担的部分。
+        local_match = feature.local_semantic_rank >= _LOCAL_SEMANTIC_THRESHOLD.get(
+            risk_level, 0.95
+        )
+        base_match = (
+            feature.keyword_hit_count > 0
+            or feature.topic_match_score > 0.0
+            or local_match
+        )
         if not feature.llm_feature_used:
             return base_match
         if risk_level == "high":
@@ -266,6 +304,8 @@ class Scorer:
         )
 
     def _has_semantic_support(self, *, risk_level: str, feature: NodeFeature) -> bool:
+        # 每个分支都补一条本地语义通道：字面命中不足时，语义排名足够靠前也算有支撑。
+        local = feature.local_semantic_rank
         if risk_level == "high":
             if feature.llm_feature_used:
                 return (
@@ -273,19 +313,25 @@ class Scorer:
                     or feature.llm_feature_score >= 0.50
                     or feature.topic_match_score >= 0.30
                 )
-            return feature.keyword_hit_count >= 2 or feature.topic_match_score >= 0.18
+            return (
+                feature.keyword_hit_count >= 2
+                or feature.topic_match_score >= 0.18
+                or local >= _LOCAL_SEMANTIC_THRESHOLD["high"]
+            )
         if risk_level == "medium":
             return (
                 feature.event_semantic_relevance_score >= 0.25
                 or feature.llm_feature_score >= 0.20
                 or feature.keyword_hit_count >= 1
                 or feature.topic_match_score >= 0.08
+                or local >= _LOCAL_SEMANTIC_THRESHOLD["medium"]
             )
         return (
             feature.event_semantic_relevance_score >= 0.18
             or feature.llm_feature_score >= 0.15
             or feature.keyword_hit_count >= 1
             or feature.topic_match_score > 0.0
+            or local >= _LOCAL_SEMANTIC_THRESHOLD["low"]
         )
 
     def _dispatch_weights(self, event) -> dict[str, float]:

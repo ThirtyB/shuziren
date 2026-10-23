@@ -412,11 +412,17 @@ class RuleBasedEventParser:
             event_type = str(response.get("event_type") or parsed_event.event_type).strip() or parsed_event.event_type
             target_goal = str(response.get("target_goal") or parsed_event.target_goal).strip() or parsed_event.target_goal
             target_audience = self._normalize_str_list(response.get("target_audience")) or parsed_event.target_audience
-            extracted_keywords = self._normalize_str_list(response.get("extracted_keywords")) or parsed_event.extracted_keywords
+            extracted_keywords = self._merge_keyword_lists(
+                self._normalize_str_list(response.get("extracted_keywords")),
+                parsed_event.extracted_keywords,
+            )
             risk_level = str(response.get("risk_level") or parsed_event.constraints.risk_level).strip().lower()
             if risk_level not in {"low", "medium", "high"}:
                 risk_level = parsed_event.constraints.risk_level
-            semantic_tags = self._normalize_str_list(response.get("semantic_tags")) or parsed_event.semantic_tags
+            semantic_tags = self._merge_keyword_lists(
+                self._normalize_str_list(response.get("semantic_tags")),
+                parsed_event.semantic_tags,
+            )
             narrative_frames = self._normalize_str_list(response.get("narrative_frames")) or parsed_event.narrative_frames
             sensitive_entities = self._normalize_str_list(response.get("sensitive_entities"))
             target_roles = self._normalize_roles(response.get("target_roles")) or parsed_event.target_roles
@@ -463,6 +469,21 @@ class RuleBasedEventParser:
         if not isinstance(value, list):
             return []
         return _dedupe_preserve_order([str(item).strip() for item in value if str(item).strip()])
+
+    def _merge_keyword_lists(self, primary: list[str], fallback: list[str]) -> list[str]:
+        """把 LLM 解析结果与规则解析结果**合并**（LLM 的在前，规则的补在后）。
+
+        这里不能用 ``or`` 整体替换。规则解析会产出「讨论」「传播」「热点领域」这类
+        能与 profile 兴趣标签（如「公共讨论」「热点事件」）对上的基础词；而 LLM
+        倾向给出「货币政策传导滞后」「微观体感与宏观政策落差」这类新闻分析式长标签。
+        一旦整体替换，``keyword_hit_count`` 与 ``topic_match_score`` 会全部归零，
+        ``Scorer._semantic_gate`` 对每个节点都判否，整轮退化成 ``no_eligible_nodes``。
+
+        大模型只负责事件解析之后这一点尤其关键：选人 / 打分都不再询问大模型，事件
+        标签是唯一进入匹配环节的 LLM 产物，把基础词换掉就等于整轮白跑。
+        """
+
+        return _dedupe_preserve_order([*primary, *fallback])
 
     def _normalize_roles(self, value: Any) -> list[str]:
         allowed = {"core_publish_node", "interaction_response_node", "amplification_node", "support_node"}

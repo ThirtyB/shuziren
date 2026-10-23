@@ -15,6 +15,8 @@ from rapidfuzz import fuzz
 
 from .data_loader import DataLoader
 from .llm_client import LLMClientError, OpenAICompatibleLLMClient
+from .local_models import load_local_models
+from .local_semantic import build_event_text
 from .models import (
     EnrichedUserProfile,
     FeatureBuildResult,
@@ -28,6 +30,12 @@ from .models import (
 from .prompts import build_feature_enrichment_system_prompt, build_feature_enrichment_user_prompt
 
 logger = logging.getLogger(__name__)
+
+#: 各语义后端下「值得考虑」的余弦绝对下限。
+#: 低于它的节点即使排进本次事件前 10% 也置 0 —— 当整个库与话题都不相关时，
+#: 纯分位数会强行选出「最不无关」的一批人，绝对下限就是拦住这种情况。
+#: BGE 无关文本的余弦约 0.15~0.25，取 0.30；SVD 的 p95 才 0.11，取 0.10。
+LOCAL_SEMANTIC_FLOOR = {"bge": 0.30, "svd": 0.10}
 
 _SPACE_RE = re.compile(r"\s+")
 _NON_TEXT_RE = re.compile(r"[^\w\u4e00-\u9fff]+", re.UNICODE)
@@ -756,6 +764,39 @@ class FeatureBuilder:
         matched_keywords_arr = df["matched_keywords"].to_list()
         keyword_hit_count_arr = df["keyword_hit_count"].to_numpy()
 
+        # ---- 本地模型分：语义相关度 + 图结构传播潜力 ----
+        # 产物由 ``scripts/build_local_models.py`` 预计算；缺失时两个数组保持全 0，
+        # 打分链路自动退回纯规则模式（单测的最小数据集就是这种情况）。
+        local_models = load_local_models(workspace_root) if workspace_root else None
+        semantic_arr = np.zeros(len(user_id_arr), dtype=np.float64)
+        potential_arr = np.zeros(len(user_id_arr), dtype=np.float64)
+        semantic_rank_arr = np.zeros(len(user_id_arr), dtype=np.float64)
+        if local_models is not None:
+            # ``build_event_text`` 只编码 1 条话题，随后一次矩阵乘法覆盖全部节点。
+            semantic_map = local_models.semantic_scores(build_event_text(event))
+            potential_map = local_models.graph_potentials()
+            semantic_arr = np.fromiter(
+                (semantic_map.get(str(uid), 0.0) for uid in user_id_arr),
+                dtype=np.float64,
+                count=len(user_id_arr),
+            )
+            potential_arr = np.fromiter(
+                (potential_map.get(str(uid), 0.0) for uid in user_id_arr),
+                dtype=np.float64,
+                count=len(user_id_arr),
+            )
+
+            # 分位数排名（0~1）：让 gate 阈值跨后端、跨事件保持同一含义。
+            # 低于后端绝对下限的节点直接置 0，避免"全库都不相关"时仍放行前 10%。
+            backend = str(getattr(local_models.encoder, "backend", "svd"))
+            floor = LOCAL_SEMANTIC_FLOOR.get(backend, 0.10)
+            if len(semantic_arr) > 1:
+                order = semantic_arr.argsort().argsort()
+                semantic_rank_arr = order / float(len(semantic_arr) - 1)
+            semantic_rank_arr = np.where(
+                semantic_arr >= floor, semantic_rank_arr, 0.0
+            )
+
         node_features: list[NodeFeature] = []
         # Pydantic 2 的 __setattr__ 每次都要走 _model_field_setattr_handler，
         # 35k * 47 字段 ≈ 1.6s 浪费。用 __new__ + __dict__.update 完全绕过，
@@ -805,6 +846,9 @@ class FeatureBuilder:
             d["semantic_tags"] = list(mk[:4])
             d["keyword_hit_count"] = int(keyword_hit_count_arr[i])
             d["matched_keywords"] = list(mk)
+            d["local_semantic_score"] = float(semantic_arr[i])
+            d["local_semantic_rank"] = float(semantic_rank_arr[i])
+            d["graph_potential"] = float(potential_arr[i])
             nf = NodeFeature.__new__(NodeFeature)
             nf.__dict__.update(d)
             # Pydantic 2 内部状态：缺这些下游 model_copy / model_dump / 校验会出错

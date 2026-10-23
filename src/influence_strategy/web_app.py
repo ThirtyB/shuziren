@@ -31,6 +31,7 @@ from .eval_hot_events import (
     select_hot_events,
 )
 from .image_event_loader import SUPPORTED_IMAGE_SUFFIXES, load_image_events
+from .llm_client import LLMClientError, OpenAICompatibleLLMClient
 from .platform_dispatcher import PlatformSpec, to_json_dict
 
 
@@ -38,9 +39,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_EVENTS_PATH = PROJECT_ROOT / "eval" / "hot_event_opinion_variants_200.json"
 WEB_RUNS_ROOT = PROJECT_ROOT / "outputs" / "web_runs"
 BENCHMARK_RUNS_ROOT = WEB_RUNS_ROOT / "benchmark_runs"
+# LLM 往返延迟测试单独落盘：它只测"发出请求 → 收到响应"这一段，与压测不是同一
+# 类结果，混进压测历史会让两者都难以解读。
+LLM_LATENCY_ROOT = WEB_RUNS_ROOT / "llm_latency_runs"
 FRONTEND_DIST = PROJECT_ROOT / "web" / "frontend" / "dist"
 MAX_WORKERS = 1
 BENCHMARK_DEFAULT_ITERATIONS = 5
+LLM_LATENCY_DEFAULT_ITERATIONS = 3
 
 _RUNS: dict[str, dict[str, Any]] = {}
 _LOCK = threading.Lock()
@@ -48,6 +53,9 @@ _LOCK = threading.Lock()
 # "测试历史"列表，不与主控制台的运行历史混在一起。
 _BENCHMARKS: dict[str, dict[str, Any]] = {}
 _BENCHMARK_LOCK = threading.Lock()
+# LLM 往返延迟测试：同样独立于普通 run 与压测。
+_LLM_LATENCY: dict[str, dict[str, Any]] = {}
+_LLM_LATENCY_LOCK = threading.Lock()
 _EXECUTOR = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
 
@@ -107,6 +115,26 @@ class BenchmarkRequest(BaseModel):
     label: str | None = None
 
 
+class LlmLatencyRequest(BaseModel):
+    """LLM 往返延迟测试：只测"发出请求 → 收到响应"这一段时间。
+
+    与压测的区别：压测跑的是完整策略管线（事件解析 / 特征构建 / 打分 / 选人 /
+    内容生成），这里**只**把库里的一条话题交给大模型生成文案，因此计时结果就是
+    纯粹的 LLM 往返耗时，不含任何本地计算，也不受选人结果影响。
+
+    * 不传 ``event_id`` → 每次从库里**不放回**随机抽一条话题，避免重复输入命中
+      服务端缓存而失真；
+    * 传了 ``event_id`` → 锁定同一条话题跑 N 次，用于观察同一输入的耗时波动。
+
+    注意这里**不需要** ``use_llm`` 开关：本测试本身就是为了测大模型，开关关闭时
+    没有可测对象。
+    """
+
+    iterations: int = Field(default=LLM_LATENCY_DEFAULT_ITERATIONS, ge=1, le=20)
+    event_id: str | None = None
+    label: str | None = None
+
+
 class RunStatus(BaseModel):
     run_id: str
     mode: Literal["text", "image", "eval"]
@@ -147,7 +175,10 @@ def create_app() -> FastAPI:
             "workspace_root": str(PROJECT_ROOT),
             "default_events_path": str(DEFAULT_EVENTS_PATH),
             "web_runs_root": str(WEB_RUNS_ROOT),
-            "llm_default_enabled": True,
+            # 全链路默认不调用大模型：图像识别走本地 OCR，事件解析走规则，
+            # 文案走占位文本。只有显式把对应开关打开才会请求外部 API。
+            "llm_default_enabled": False,
+            "image_recognition": "local_ocr",
         }
 
     @app.get("/api/event-template")
@@ -410,6 +441,79 @@ def create_app() -> FastAPI:
         with _BENCHMARK_LOCK:
             _BENCHMARKS.pop(benchmark_id, None)
         return {"deleted": True, "benchmark_id": benchmark_id}
+
+    @app.post("/api/llm-latency")
+    def run_llm_latency(request: LlmLatencyRequest) -> dict[str, Any]:
+        """LLM 往返延迟测试：**异步**提交，立即返回 queued 状态。
+
+        只做一件事 —— 把库里的一条话题交给大模型生成文案，记录"发出请求 → 收到
+        响应"的耗时。不经过选人 / 打分 / 策略生成等任何本地计算，所以计时结果
+        可以直接反映大模型本身的响应速度。
+
+        与压测一样走后台线程池（串行排队），前端拿 ``latency_id`` 轮询
+        ``GET /api/llm-latency/{latency_id}``；可以连续提交多次，新的自动排队。
+        """
+        latency_id = f"{_timestamp_id()}_{uuid.uuid4().hex[:8]}"
+        payload: dict[str, Any] = {
+            "latency_id": latency_id,
+            "label": request.label or "LLM 延迟",
+            "state": "queued",
+            "iterations": request.iterations,
+            "event_id": request.event_id,
+            "completed": 0,
+            "failed": 0,
+            "calls": [],
+            "summary": {},
+            "created_at": _now(),
+            "updated_at": _now(),
+        }
+        _write_llm_latency(latency_id, payload)
+        _EXECUTOR.submit(
+            _llm_latency_job_wrapper,
+            latency_id,
+            request.iterations,
+            request.event_id,
+        )
+        return dict(payload)
+
+    @app.get("/api/llm-latency")
+    def list_llm_latency() -> dict[str, Any]:
+        """LLM 延迟测试的历史列表（磁盘 + 内存合并，与压测历史隔离）。"""
+        merged: dict[str, dict[str, Any]] = {}
+        if LLM_LATENCY_ROOT.exists():
+            for path in sorted(LLM_LATENCY_ROOT.glob("*/latency.json"), reverse=True):
+                try:
+                    stored = _load_json(path)
+                except (OSError, json.JSONDecodeError):
+                    continue
+                key = str(stored.get("latency_id") or path.parent.name)
+                merged[key] = stored
+        with _LLM_LATENCY_LOCK:
+            merged.update({key: dict(value) for key, value in _LLM_LATENCY.items()})
+        items = [_llm_latency_history_item(payload) for payload in merged.values()]
+        items.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+        return {"items": items[:50]}
+
+    @app.get("/api/llm-latency/{latency_id}")
+    def get_llm_latency(latency_id: str) -> dict[str, Any]:
+        """单条 LLM 延迟测试详情（含每次调用耗时、话题、文案预览），供前端轮询。"""
+        return _read_llm_latency(latency_id)
+
+    @app.delete("/api/llm-latency/{latency_id}")
+    def delete_llm_latency(latency_id: str) -> dict[str, Any]:
+        """删除一条 LLM 延迟测试记录（磁盘目录 + 内存缓存）。"""
+        payload = _read_llm_latency(latency_id)
+        if str(payload.get("state")) in {"queued", "running"}:
+            raise HTTPException(
+                status_code=409,
+                detail=f"测试 {latency_id} 仍在进行（state={payload.get('state')}），请等待结束后再删除。",
+            )
+        latency_dir = _llm_latency_dir(latency_id)
+        if latency_dir.exists():
+            shutil.rmtree(latency_dir)
+        with _LLM_LATENCY_LOCK:
+            _LLM_LATENCY.pop(latency_id, None)
+        return {"deleted": True, "latency_id": latency_id}
 
     @app.get("/api/runs")
     def list_runs() -> dict[str, Any]:
@@ -1322,4 +1426,243 @@ def _run_benchmark_job(
             runs=iteration_results,
             summary=_summarize_benchmark(iterations=iterations, results=iteration_results),
         )
+
+
+# --- LLM 往返延迟测试：独立内存缓存 + 独立落盘目录 + 后台线程 ---
+
+
+def _llm_latency_dir(latency_id: str) -> Path:
+    return LLM_LATENCY_ROOT / _safe_run_id(latency_id)
+
+
+def _llm_latency_path(latency_id: str) -> Path:
+    return _llm_latency_dir(latency_id) / "latency.json"
+
+
+def _read_llm_latency(latency_id: str) -> dict[str, Any]:
+    """读一条延迟测试状态：内存优先，磁盘兜底（服务重启后仍能看到历史）。"""
+    with _LLM_LATENCY_LOCK:
+        cached = _LLM_LATENCY.get(latency_id)
+        if cached is not None:
+            return dict(cached)
+    path = _llm_latency_path(latency_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"LLM latency not found: {latency_id}")
+    try:
+        payload = _load_json(path)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=500, detail=f"LLM 延迟测试状态文件损坏: {latency_id}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=500, detail=f"LLM 延迟测试状态异常: {latency_id}")
+    payload.setdefault("state", "completed")
+    payload.setdefault("calls", [])
+    with _LLM_LATENCY_LOCK:
+        _LLM_LATENCY[latency_id] = payload
+    return dict(payload)
+
+
+def _write_llm_latency(latency_id: str, payload: dict[str, Any]) -> None:
+    """覆盖写内存缓存与 ``latency.json``。
+
+    同 ``_write_benchmark`` 一样必须 deepcopy：``calls`` 是后台任务逐次 append 的
+    同一个 list，浅拷贝会让内存缓存"提前"看到后续调用。
+    """
+    snapshot = copy.deepcopy(payload)
+    with _LLM_LATENCY_LOCK:
+        _LLM_LATENCY[latency_id] = snapshot
+    path = _llm_latency_path(latency_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _update_llm_latency(latency_id: str, **updates: Any) -> dict[str, Any]:
+    """读-改-写：更新内存里那条延迟测试并落盘，返回更新后的快照。"""
+    with _LLM_LATENCY_LOCK:
+        payload = dict(_LLM_LATENCY.get(latency_id) or {})
+        payload.update(updates)
+        payload["updated_at"] = _now()
+        snapshot = dict(payload)
+        _LLM_LATENCY[latency_id] = snapshot
+    path = _llm_latency_path(latency_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+    return snapshot
+
+
+def _llm_latency_history_item(payload: dict[str, Any]) -> dict[str, Any]:
+    """把完整 payload 裁剪成历史列表需要的轻量条目。"""
+    summary = payload.get("summary") or {}
+    return {
+        "latency_id": payload.get("latency_id"),
+        "label": payload.get("label"),
+        "state": payload.get("state") or "running",
+        "iterations": payload.get("iterations"),
+        "completed": payload.get("completed") or 0,
+        "failed": payload.get("failed") or 0,
+        "avg_seconds": summary.get("avg_seconds"),
+        "created_at": payload.get("created_at"),
+        "updated_at": payload.get("updated_at"),
+    }
+
+
+def _build_latency_prompt(event: dict[str, Any]) -> tuple[str, str]:
+    """构造"给一个话题、让大模型生成文案"的提示词。
+
+    刻意让每次调用的输入规模接近（同一套字段 + 固定的字数要求），这样测出来的
+    耗时差异主要来自大模型/网络，而不是提示词长度变化。
+    """
+    system_prompt = (
+        "你是社交媒体文案助手。请根据给定的热点话题，为一名数字人生成一条"
+        "可直接发布的中文文案。必须返回严格 JSON，不要输出 Markdown。"
+    )
+    payload = {
+        "task": "根据下面的热点话题生成一条中文社交媒体文案。",
+        "topic": {
+            "event_title": event.get("event_title"),
+            "event_summary": event.get("event_summary"),
+            "domain": event.get("domain"),
+        },
+        "requirements": [
+            "post_content：文案正文，80-140 字，口语化，可直接发布。",
+            "angle：切入角度，10 字以内。",
+            "tone：语气，10 字以内。",
+            "不要编造具体数据、机构名称或当事人姓名。",
+        ],
+    }
+    return system_prompt, json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _summarize_llm_latency(calls: list[dict[str, Any]]) -> dict[str, Any]:
+    """汇总 N 次调用的往返耗时：平均 / 最小 / 最大 / 总计。"""
+    durations = [
+        float(item["elapsed_seconds"])
+        for item in calls
+        if item.get("ok") and item.get("elapsed_seconds") is not None
+    ]
+    if not durations:
+        return {}
+    return {
+        "count": len(durations),
+        "avg_seconds": round(statistics.fmean(durations), 3),
+        "min_seconds": round(min(durations), 3),
+        "max_seconds": round(max(durations), 3),
+        "total_seconds": round(sum(durations), 3),
+    }
+
+
+def _llm_latency_job_wrapper(
+    latency_id: str,
+    iterations: int,
+    pinned_event_id: str | None,
+) -> None:
+    """后台线程入口：把延迟测试从 queued 推进到 running → completed/failed。"""
+    try:
+        _update_llm_latency(latency_id, state="running")
+        _run_llm_latency_job(
+            latency_id=latency_id,
+            iterations=iterations,
+            pinned_event_id=pinned_event_id,
+        )
+    except Exception as exc:  # 任务级失败：整体标记 failed，已完成的调用仍然保留
+        _update_llm_latency(
+            latency_id,
+            state="failed",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
+
+def _run_llm_latency_job(
+    *,
+    latency_id: str,
+    iterations: int,
+    pinned_event_id: str | None,
+) -> None:
+    """串行发起 N 次"话题 → 文案"的大模型调用，逐次记录往返耗时。
+
+    计时只包住 ``client.generate_json``，即"请求发出 → 拿到解析后的 JSON"，正好
+    对应"发送给大模型 → 接收到大模型响应"；本地的事件解析 / 特征构建 / 打分 /
+    选人都不参与，因此这个数字可以直接反映大模型本身的响应速度。
+    """
+    client = OpenAICompatibleLLMClient.from_env_files(PROJECT_ROOT)
+    if client is None:
+        raise RuntimeError("未配置大模型（缺少 API Key 或 base_url），无法进行延迟测试。")
+
+    provider = None
+    model = None
+    if hasattr(client, "describe"):
+        details = client.describe() or {}
+        provider = details.get("provider")
+        model = details.get("model")
+    else:
+        provider = getattr(client, "provider", None)
+        model = getattr(client, "model", None)
+    _update_llm_latency(latency_id, provider=provider, model=model)
+
+    hot_events = load_hot_events(DEFAULT_EVENTS_PATH)
+    if pinned_event_id:
+        picked = select_hot_events(hot_events, event_id=pinned_event_id, event_limit=1)
+        if not picked:
+            raise RuntimeError(f"指定的事件 ID 没有匹配到 hot_event：{pinned_event_id}")
+        selected = [picked[0]] * iterations
+    else:
+        selected = _pick_random_hot_events(hot_events, count=iterations)
+        if not selected:
+            raise RuntimeError("hot_event 集合为空，无法执行延迟测试。")
+        while len(selected) < iterations:  # 次数超过话题总数时才允许重复
+            selected.append(random.choice(selected))
+
+    calls: list[dict[str, Any]] = []
+    for index, raw_event in enumerate(selected, start=1):
+        event = _normalize_hot_event(raw_event)
+        system_prompt, user_prompt = _build_latency_prompt(event)
+
+        started = time.perf_counter()
+        error: str | None = None
+        response_chars = 0
+        preview = ""
+        try:
+            response = client.generate_json(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            )
+            if isinstance(response, dict):
+                response_chars = len(json.dumps(response, ensure_ascii=False))
+                post_content = response.get("post_content")
+                if isinstance(post_content, str) and post_content.strip():
+                    preview = post_content.strip()
+        except (LLMClientError, OSError, ValueError, TypeError) as exc:
+            error = f"{type(exc).__name__}: {exc}"
+        elapsed = time.perf_counter() - started
+
+        calls.append(
+            {
+                "index": index,
+                "ok": error is None,
+                "elapsed_seconds": round(elapsed, 3),
+                "event_id": event.get("event_id"),
+                "event_title": event.get("event_title"),
+                "prompt_chars": len(user_prompt),
+                "response_chars": response_chars,
+                "preview": preview[:120],
+                "error": error,
+            }
+        )
+        # 每完成一次就公告，前端轮询能立刻看到进度。
+        _update_llm_latency(
+            latency_id,
+            calls=list(calls),
+            completed=sum(1 for item in calls if item.get("ok")),
+            failed=sum(1 for item in calls if not item.get("ok")),
+        )
+
+    _update_llm_latency(
+        latency_id,
+        state="completed",
+        calls=calls,
+        completed=sum(1 for item in calls if item.get("ok")),
+        failed=sum(1 for item in calls if not item.get("ok")),
+        summary=_summarize_llm_latency(calls),
+    )
 

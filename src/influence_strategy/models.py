@@ -183,6 +183,19 @@ class NodeFeature(BaseModel):
     keyword_hit_count: int = 0
     matched_keywords: list[str] = Field(default_factory=list)
     candidate_reasoning: list[str] = Field(default_factory=list)
+    # 本地语义模型打分：语义编码器给出的余弦相似度，取值取决于后端
+    # （BGE 约 0.15~0.70，SVD 约 -0.2~0.15），因此只用于打分，不直接做阈值判断。
+    local_semantic_score: float = 0.0
+    # 同一批节点内的**分位数排名**（0~1，1 表示最相关）。
+    # 门控用它而不是原始余弦：不同后端、不同事件的余弦绝对值差异很大
+    # （BGE 的 p50≈0.30 而 SVD 的 p95≈0.11），固定绝对阈值要么全放行要么全拒绝；
+    # 分位数则恒定表示"是否进入本次事件的前 N%"。
+    # 低于后端绝对下限的节点会被置 0，避免"整个库都不相关"时仍放行前 10%。
+    local_semantic_rank: float = 0.0
+    # 图结构传播潜力（SGC 邻居传播 + PageRank 等指标融合），取值 0~1。
+    # diffusion_score 只看节点自身的转发/评论计数，看不到它在关系网络中的位置；
+    # 这个分补上"处在互动密集社群中心"这类结构信号。
+    graph_potential: float = 0.0
 
 
 class FeatureBuildSummary(BaseModel):

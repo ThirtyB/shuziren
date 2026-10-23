@@ -4,9 +4,9 @@ import { ImageIcon, Upload, X } from "lucide-react";
 /**
  * 多模态图像事件输入。
  *
- * 后端 ``POST /api/runs/image`` 用 :envvar:`VISION_LLM_MODEL`（默认
- * ``qwen3-vl-flash``）识别图片中的新闻事件，再走与文本事件完全相同的策略生成
- * 管线。视觉模型不可用时后端会回退到 ``image_event_loader._fallback_result``，
+ * 后端 ``POST /api/runs/image`` 用**本地 OCR**（RapidOCR）只读取图片上的文字，
+ * 再用规则重组成事件字段，全程不调用大模型、不发起外部请求。读不出文字时会
+ * 返回 ``method="unrecognized"`` 的低置信度结果，由人工确认，而不是编造内容。
  * 前端这边只负责：
  *
  *  1. 校验后缀（.png / .jpg / .jpeg / .webp）和大小（≤ 8 MB）；
@@ -85,7 +85,7 @@ export function ImageEventForm({ onFileChange }: ImageEventFormProps) {
             {file ? "更换图片" : "选择图片"}
           </button>
           <p className="image-event-hint">
-            支持 .png / .jpg / .jpeg / .webp（≤ 8 MB），由后端视觉 LLM 识别事件标题 / 概要 / 关键词 / 观点变体后进入策略生成。
+            支持 .png / .jpg / .jpeg / .webp（≤ 8 MB）。由本地 OCR 读取图片上的文字，再提取事件标题 / 概要 / 关键词 / 观点变体后进入策略生成；图片需包含可辨识的文字。
           </p>
         </div>
         <div className="image-event-preview">

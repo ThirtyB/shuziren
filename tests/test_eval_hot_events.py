@@ -4,6 +4,7 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from influence_strategy.eval_hot_events import (
     _build_llm_node_texts,
@@ -328,6 +329,13 @@ class EvalHotEventsTest(unittest.TestCase):
             )
 
     def test_run_hot_event_evaluation_replaces_text_fields_with_llm_content(self) -> None:
+        """LLM 文案路径：开启 ``CONTENT_LLM_ENABLED`` 后正文应被模型输出替换。
+
+        项目已改为本地部署、不调用第三方 API，该开关默认关闭（正文走规则占位
+        文本）。本用例保护的是"重新打开后这条路径依然可用"，因此显式 patch 开关，
+        而不是依赖默认值 —— 否则它测的就不再是 LLM 替换逻辑了。
+        """
+
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             self._write_minimal_workspace(root)
@@ -350,13 +358,14 @@ class EvalHotEventsTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            output_path, payload = run_hot_event_evaluation(
-                workspace_root=root,
-                input_path=input_path,
-                output_dir=eval_dir / "output",
-                llm_client=FakeLLMClient(),
-                trace_dir=root / "tests" / "pipeline_step_outputs",
-            )
+            with patch("influence_strategy.eval_hot_events.CONTENT_LLM_ENABLED", True):
+                output_path, payload = run_hot_event_evaluation(
+                    workspace_root=root,
+                    input_path=input_path,
+                    output_dir=eval_dir / "output",
+                    llm_client=FakeLLMClient(),
+                    trace_dir=root / "tests" / "pipeline_step_outputs",
+                )
 
             self.assertTrue(output_path.exists())
             content_items = payload["五维调度策略"]["内容"]["数字人发帖内容"]
