@@ -158,7 +158,23 @@ def build_selector_user_prompt(
             "selected_order 只包含候选中的 user_id。",
             "尽量覆盖核心首发、互动承接、扩散等不同角色。",
             "优先选择语义贴合且彼此不过度同质的节点。",
-            "理由保持简短，每个节点 1-3 个短语。",
+            # 第八轮：输出侧的克制要求。
+            # 本地 qwen3:8b 在这一阶段的耗时由**输出生成**主导（第七轮把提示词
+            # 压掉 43.8% 只换来 10.3% 提速），所以这一轮只动输出，不碰候选池。
+            # 字段全部保留（解析与下游契约不变），只要求模型少写、不写。
+            #
+            # 第八轮（续）：只写"少写、不写"会让 qwen3:8b 把 selected_order
+            # 退化成纯 ID 数组（"selected_order":["96961",...]），
+            # user_id / recommended_role / reasoning 三项全丢，Selector 解析时
+            # 整批丢弃 → order_map 为空 → 静默退回纯规则路径：实测名单与规则
+            # 基线逐位相同，LLM 重排等于没跑，那次调用（约 6s）全部白花。
+            # 所以把"必须写"说清楚：reasoning 保留，但每个节点只写 1 条 4-8 字短语。
+            # 实测 completion tokens 484 → 355，selector 15.4s → 12.6s，
+            # 且 10/10 节点仍带 llm_selector= 理由。
+            "reasoning 每个节点必须写且只写 1 条短语，4-8 个字，例如“主题贴合”，不能为空数组。",
+            # fallback_order / global_notes 在下游无消费者（fallback 名单由候选池
+            # 构建），要求空数组是安全的输出削减；压缩它们不会丢任何可解释性。
+            "fallback_order 和 global_notes 直接返回空数组 []，不要写任何内容。",
             "recommended_role 只能是 core_publish_node、interaction_response_node、amplification_node、support_node 之一。",
         ],
         "shortlist": shortlist,
@@ -167,11 +183,62 @@ def build_selector_user_prompt(
                 {
                     "user_id": "81584",
                     "recommended_role": "core_publish_node",
-                    "reasoning": ["适合首发", "主题贴合"],
+                    "reasoning": ["主题贴合"],
                 }
             ],
-            "fallback_order": ["162909", "73085"],
-            "global_notes": ["需要角色覆盖", "避免同质化"],
+            "fallback_order": [],
+            "global_notes": [],
         },
     }
-    return json.dumps(payload, ensure_ascii=False, indent=2)
+    # 第三轮性能优化：紧凑序列化。
+    # indent=2 的换行/缩进不含语义，却把提示词从 9.7KB 撑到 14.6KB；
+    # 且模型会模仿缩进风格、产出更长的响应（实测 2,148 -> 1,218 字符），
+    # 而输出 token 才是本阶段真正的耗时项。payload 内容完全不变。
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def build_selector_id_order_user_prompt(
+    *,
+    event: ParsedEvent,
+    max_selected: int,
+    shortlist: list[dict[str, Any]],
+) -> str:
+    """第十三轮：只让模型输出**排序后的 user_id**，不再输出角色与理由。
+
+    依据（本轮实测，同一事件 / 同一 15 人候选池 / 本地 qwen3:8b）：
+    selector 的耗时由**输出生成**主导——把输出从
+    ``[{user_id, recommended_role, reasoning}]``（约 389 completion tokens）
+    压到 ``["96961", ...]``（约 71 tokens）后，单次调用
+    **11.85s → 3.90s（-67%）**；而继续压缩输入画像（prompt 2129 → 1549 tokens）
+    在这个输出规模下**没有可测收益**（3.90s vs 3.92s），因此输入侧保持原样。
+
+    语义能力没有削弱：模型照样要读事件目标、候选人画像与特征，并自行比较
+    语义相关性、影响力、互动能力与事件适配度来**决定顺序**——变的只是它
+    "说出来"的方式。角色（``role_hint``）与理由由程序按既有规则补齐，
+    评分公式、角色分配原则与安全过滤一律不动。
+
+    输出仍是 JSON **对象**（``{"selected_order": [...]}``），
+    与 ``llm_client`` 的"必须是对象"约束保持一致。
+    """
+    payload = {
+        "task": "按与该事件的适配程度，把候选节点从最合适到最不合适排序。",
+        "event": {
+            "event_title": event.event_title,
+            "target_goal": event.target_goal,
+            "event_type": event.event_type,
+            "risk_level": event.constraints.risk_level,
+            "target_audience": event.target_audience,
+            "semantic_tags": event.semantic_tags,
+            "negative_constraints": event.negative_constraints,
+        },
+        "constraints": {"max_selected_nodes": max_selected},
+        "requirements": [
+            "只输出 selected_order，值必须是候选里的 user_id 字符串。",
+            "比较语义相关性、影响力、互动能力与事件适配度后再排序，越合适越靠前。",
+            "尽量覆盖核心首发、互动承接、扩散等不同角色类型。",
+            "不要输出 recommended_role、reasoning、fallback_order、global_notes 等任何其他字段。",
+        ],
+        "shortlist": shortlist,
+        "required_json_schema": {"selected_order": ["81584", "96961"]},
+    }
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))

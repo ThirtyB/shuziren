@@ -399,6 +399,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="关闭大模型增强，仅运行规则流水线。",
     )
+    # 第十轮：事件解析阶段的 LLM 默认 off（与生产默认一致，走规则解析）。
+    # 评测要复现"事件解析也用 LLM"的旧结果时显式给 on。选人阶段的 LLM
+    # 不受此开关影响，仍由 --disable-llm 控制。
+    parser.add_argument(
+        "--event-parser-llm",
+        choices=["on", "off"],
+        default="off",
+        help="事件解析阶段是否调用大模型，默认 off（走规则解析）。",
+    )
     parser.add_argument(
         "--target-user-id",
         type=str,
@@ -578,6 +587,8 @@ def main() -> int:
                 max_frequency_per_day=args.max_frequency_per_day,
                 allowed_platforms=allowed_platforms,
                 use_llm=not args.disable_llm,
+                # 第十轮：评测入口显式传值，默认与生产一致（关闭事件解析 LLM）。
+                use_llm_event_parser=args.event_parser_llm == "on",
                 trace_dir=run_dirs.trace_dir,
                 recall_size=effective_recall_size,
                 recall_mode=effective_recall_mode,
@@ -606,6 +617,7 @@ def main() -> int:
                 max_frequency_per_day=args.max_frequency_per_day,
                 allowed_platforms=allowed_platforms,
                 use_llm=not args.disable_llm,
+                use_llm_event_parser=args.event_parser_llm == "on",
                 trace_dir=run_dirs.trace_dir,
                 target_user_id=args.target_user_id,
                 dispatch_platform=effective_dispatch_platform,
@@ -626,6 +638,7 @@ def main() -> int:
                 max_frequency_per_day=args.max_frequency_per_day,
                 allowed_platforms=allowed_platforms,
                 use_llm=not args.disable_llm,
+                use_llm_event_parser=args.event_parser_llm == "on",
                 trace_dir=run_dirs.trace_dir,
                 target_user_id=args.target_user_id,
                 dispatch_platform=effective_dispatch_platform,

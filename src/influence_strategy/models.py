@@ -384,6 +384,11 @@ class StrategySummary(BaseModel):
     #   * ``no_eligible_nodes``  没有主选，需要人工挑选首发账号
     status: Literal["ok", "manual_required", "no_eligible_nodes"] = "ok"
     status_reason: str = ""
+    # 多人分发指定的平台（从 SelectionSummary 透传）。
+    # reporting.py 与 main.py 都会读该字段，缺失会导致渲染阶段 AttributeError。
+    dispatch_platform: str | None = None
+    # 单人分发目标数字人所属平台（同样从 SelectionSummary 透传）。
+    target_platform: str | None = None
 
 
 class StrategyResult(BaseModel):

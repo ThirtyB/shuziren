@@ -574,6 +574,9 @@ def run_hot_event_evaluations(
     dispatch_platform: str | None = None,
     recall_size: int = 200,
     recall_mode: Literal["platform_aware"] = "platform_aware",
+    # 第十轮：事件解析阶段 LLM 独立开关，透传给单次运行函数。
+    # None = 走生产默认（关闭）；显式 True 可复现旧的 LLM 事件解析行为。
+    use_llm_event_parser: bool | None = None,
 ) -> list[tuple[Path, dict[str, Any]]]:
     events = load_hot_events(input_path)
     selected_events = select_hot_events(
@@ -607,6 +610,7 @@ def run_hot_event_evaluations(
             dispatch_platform=dispatch_platform,
             recall_size=recall_size,
             recall_mode=recall_mode,
+            use_llm_event_parser=use_llm_event_parser,
         )
         results.append((output_path, output_payload))
 
@@ -633,6 +637,8 @@ def run_hot_event_dict_evaluations(
     dispatch_platform: str | None = None,
     recall_size: int = 200,
     recall_mode: Literal["platform_aware"] = "platform_aware",
+    # 第十轮：事件解析阶段 LLM 独立开关，透传给单次运行函数。
+    use_llm_event_parser: bool | None = None,
 ) -> list[tuple[Path, dict[str, Any]]]:
     selected_events = select_hot_events(
         events,
@@ -665,6 +671,7 @@ def run_hot_event_dict_evaluations(
             dispatch_platform=dispatch_platform,
             recall_size=recall_size,
             recall_mode=recall_mode,
+            use_llm_event_parser=use_llm_event_parser,
         )
         results.append((output_path, output_payload))
     return results
@@ -689,6 +696,8 @@ def run_hot_event_multiplatform_evaluations(
     trace_dir: str | Path | None = None,
     recall_size: int = 200,
     recall_mode: Literal["platform_aware"] = "platform_aware",
+    # 第十轮：事件解析阶段 LLM 独立开关，透传给单次运行函数。
+    use_llm_event_parser: bool | None = None,
 ) -> list[tuple[Path, dict[str, Any]]]:
     """多平台并行分发入口。
 
@@ -733,6 +742,7 @@ def run_hot_event_multiplatform_evaluations(
             trace_dir=run_dirs.trace_dir,
             recall_size=recall_size,
             recall_mode=recall_mode,
+            use_llm_event_parser=use_llm_event_parser,
         )
         results.append((output_path, output_payload))
     return results
@@ -755,6 +765,19 @@ def _run_hot_event_multiplatform_evaluation(
     trace_dir: str | Path,
     recall_size: int = 200,
     recall_mode: Literal["platform_aware"] = "platform_aware",
+    # 第十轮：事件解析阶段 LLM 独立开关。None = 走生产默认（关闭，
+    # 见 pipeline.DEFAULT_USE_LLM_EVENT_PARSER），显式 True/False 覆盖。
+    # 评测若需复现"事件解析也用 LLM"的旧行为，显式传 True（run_eval.py
+    # 的 --event-parser-llm on）。
+    use_llm_event_parser: bool | None = None,
+    # 第七轮：选人阶段 LLM 独立开关；None = 跟随 use_llm。
+    use_llm_selector: bool | None = None,
+    # 选人阶段大模型重排前的规则初选候选上限，默认 15；<=0 表示关闭初选。
+    selector_candidate_limit: int | None = None,
+    # 第十四轮：节点正文 LLM 开关。默认 True —— CLI / run_eval / ablation
+    # 等既有入口行为完全不变；只有页面测试控制台路径传 False，正文改走
+    # 已有的规则兜底（``_fallback_node_content``），字段一个都不少。
+    use_llm_content: bool = True,
 ) -> tuple[Path, dict[str, Any], dict[str, float]]:
     root = Path(workspace_root)
     stage_times: dict[str, float] = {}
@@ -790,6 +813,9 @@ def _run_hot_event_multiplatform_evaluation(
         target_user_id=None,
         recall_size=recall_size,
         recall_mode=recall_mode,
+        use_llm_event_parser=use_llm_event_parser,
+        use_llm_selector=use_llm_selector,
+        selector_candidate_limit=selector_candidate_limit,
     )
     for key, value in artifacts.stage_times.items():
         stage_times[key] = value
@@ -814,6 +840,7 @@ def _run_hot_event_multiplatform_evaluation(
         workspace_root=root,
         use_llm=use_llm,
         llm_client=client,
+        use_llm_content=use_llm_content,
     )
     stage_times["content_generation"] = time.perf_counter() - t0
 
@@ -861,6 +888,8 @@ def build_multiplatform_output(
     workspace_root: str | Path | None = None,
     use_llm: bool = True,
     llm_client: Any | None = None,
+    # 第十四轮：节点正文 LLM 开关，默认 True（既有入口行为不变）。
+    use_llm_content: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """构造跨平台分发的最终业务输出（与多人分发共用五维结构）。
 
@@ -902,6 +931,7 @@ def build_multiplatform_output(
         or dispatch_result.dispatch_mode,
         target=target,
         workspace_root=workspace_root,
+        use_llm_content=use_llm_content,
         use_llm=use_llm,
         llm_client=llm_client,
         platform_for=_dispatch_platform_of_node,
@@ -1191,6 +1221,9 @@ def build_eval_output(
     workspace_root: str | Path | None = None,
     use_llm: bool = True,
     llm_client: Any | None = None,
+    # 第十四轮：节点正文 LLM 开关，默认 True（既有入口行为不变）。
+    # 关闭后正文走规则兜底，五维策略与动作清单的字段一个都不少。
+    use_llm_content: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     selected_nodes = strategy_result.selected_nodes
     selected_ids = [node.user_id for node in selected_nodes]
@@ -1216,6 +1249,7 @@ def build_eval_output(
         workspace_root=workspace_root,
         use_llm=use_llm,
         llm_client=llm_client,
+        use_llm_content=use_llm_content,
     )
 
     node_outputs, post_refs, _ = _build_node_outputs(
@@ -2414,6 +2448,19 @@ def _run_hot_event_evaluation(
     dispatch_platform: str | None = None,
     recall_size: int = 200,
     recall_mode: Literal["platform_aware"] = "platform_aware",
+    # 第十轮：事件解析阶段 LLM 独立开关。None = 走生产默认（关闭，
+    # 见 pipeline.DEFAULT_USE_LLM_EVENT_PARSER），显式 True/False 覆盖。
+    # 评测若需复现"事件解析也用 LLM"的旧行为，显式传 True（run_eval.py
+    # 的 --event-parser-llm on）。
+    use_llm_event_parser: bool | None = None,
+    # 第七轮：选人阶段 LLM 独立开关；None = 跟随 use_llm。
+    use_llm_selector: bool | None = None,
+    # 选人阶段大模型重排前的规则初选候选上限，默认 15；<=0 表示关闭初选。
+    selector_candidate_limit: int | None = None,
+    # 第十四轮：节点正文 LLM 开关。默认 True —— CLI / run_eval / ablation
+    # 等既有入口行为完全不变；只有页面测试控制台路径传 False，正文改走
+    # 已有的规则兜底（``_fallback_node_content``），字段一个都不少。
+    use_llm_content: bool = True,
 ) -> tuple[Path, dict[str, Any], dict[str, float]]:
     root = Path(workspace_root)
     stage_times: dict[str, float] = {}
@@ -2460,6 +2507,9 @@ def _run_hot_event_evaluation(
         dispatch_platform=dispatch_platform,
         recall_size=effective_recall_size,
         recall_mode=effective_recall_mode,
+        use_llm_event_parser=use_llm_event_parser,
+        use_llm_selector=use_llm_selector,
+        selector_candidate_limit=selector_candidate_limit,
     )
     # 把 pipeline 子键展开成顶层键，便于压测面板直接拿 event_parser/feature_builder/...
     for key, value in artifacts.stage_times.items():
@@ -2472,6 +2522,7 @@ def _run_hot_event_evaluation(
         workspace_root=root,
         use_llm=use_llm,
         llm_client=client,
+        use_llm_content=use_llm_content,
     )
     stage_times["content_generation"] = time.perf_counter() - t0
 
@@ -2517,9 +2568,14 @@ def _build_llm_node_texts(
     use_llm: bool,
     llm_client: Any | None,
     platform_for: Callable[[StrategyNodePlan], str] | None = None,
+    # 第十四轮：调用方可以显式关掉这一步。默认 True，保证 CLI / run_eval /
+    # ablation 等既有入口行为完全不变；只有页面测试控制台路径传 False。
+    # 关闭后**不发任何请求**，直接返回空 override，节点正文走已有的规则兜底
+    # （``_fallback_node_content``），因此输出契约里的字段不会缺失。
+    use_llm_content: bool = True,
 ) -> tuple[dict[str, dict[str, str]], dict[str, Any]]:
     metadata: dict[str, Any] = {
-        "requested": bool(use_llm),
+        "requested": bool(use_llm) and bool(use_llm_content),
         "configured": False,
         "attempted": False,
         "used": False,
@@ -2529,6 +2585,17 @@ def _build_llm_node_texts(
         "fallback_reason": None,
     }
     started = time.monotonic()
+
+    # 第十四轮：调用方明确禁用时，走与"llm_disabled"同构的显式兜底分支。
+    # 这里不是异常吞掉——没有发起请求，也没有失败的内容，只是本路径不需要
+    # LLM 正文，兜底原因会被如实写进 trace 的 ``post_content_source``。
+    if not use_llm_content:
+        # 刻意**不**记入 ``_CONTENT_LLM_METRICS``：那是"内容生成 LLM 调用"的
+        # 成功率基线，而这里压根没有发起调用，算一次 failure 会把"主动关闭"
+        # 污染成"调用失败"。可观测性由 metadata 与 trace 的
+        # ``post_content_source=rule_fallback`` 承担。
+        metadata["fallback_reason"] = "content_llm_disabled_by_caller"
+        return {}, metadata
 
     if not use_llm:
         metadata["fallback_reason"] = "llm_disabled"

@@ -21,6 +21,8 @@ from .models import (
 _JSON_CACHE: dict[tuple[str, int], Any] = {}
 # ``load_enriched_graph_attributes`` 的校验结果缓存：(path, mtime, limit) → dict。
 _ENRICHED_GA_CACHE: dict[tuple[str, int, int | None], dict[str, GraphAttributes]] = {}
+# 第九轮：``load_profiles`` 的校验结果缓存：(path, mtime, limit) → dict[str, UserProfile]。
+_PROFILES_CACHE: dict[tuple[str, int, int | None], dict[str, UserProfile]] = {}
 
 
 class DataLoader:
@@ -132,6 +134,18 @@ class DataLoader:
         if not isinstance(payload, dict):
             raise ValueError("Profile file must contain a JSON object.")
 
+        # 第九轮：与 ``load_enriched_graph_attributes`` 同款的校验结果缓存。
+        # 原始 JSON 早已进 ``_JSON_CACHE``，但这里每次调用仍要把 35,636 条
+        # profile 重新跑一遍 ``UserProfile.model_validate``（实测 0.17~0.26s/次），
+        # 在多事件评测 / 5 次压测里这份开销会按次数线性重复。
+        # 缓存键带 (path, mtime_ns, limit)，文件一变即失效；调用方只读不写
+        # profile 对象，共享实例不会引入互相污染（全仓无对 profile 的就地修改）。
+        mtime = selected_path.stat().st_mtime_ns if selected_path.exists() else 0
+        cache_key = (str(selected_path), mtime, limit)
+        cached = _PROFILES_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
         result: dict[str, UserProfile] = {}
         for index, (user_id, raw_profile) in enumerate(payload.items()):
             if limit is not None and index >= limit:
@@ -140,6 +154,7 @@ class DataLoader:
             item["user_id"] = str(item.get("user_id", user_id))
             item["user_name"] = item.get("user_name") or f"user_{user_id}"
             result[str(user_id)] = UserProfile.model_validate(item)
+        _PROFILES_CACHE[cache_key] = result
         return result
 
     def load_interactions(

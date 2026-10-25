@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import random
 import re
 import shutil
 import statistics
+import sys
 import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -31,6 +34,7 @@ from .eval_hot_events import (
     select_hot_events,
 )
 from .image_event_loader import SUPPORTED_IMAGE_SUFFIXES, load_image_events
+from .llm_client import OpenAICompatibleLLMClient, read_env_values
 from .platform_dispatcher import PlatformSpec, to_json_dict
 
 
@@ -79,6 +83,22 @@ class RunOptions(BaseModel):
     platform_specs: list[PlatformSpec] = Field(default_factory=list)
 
     use_llm: bool = True
+    # 第十轮：事件解析阶段默认**不调用** LLM（与 pipeline 生产默认一致，
+    # 见 DEFAULT_USE_LLM_EVENT_PARSER），selector 仍用 LLM。
+    # 前端不传或传 null 时都走规则解析；显式传 true 可做对照实验。
+    # 事件解析不调用 LLM 时仍然接受任意新事件（走规则解析）。
+    use_llm_event_parser: bool | None = False
+    # 第七轮：选人阶段的 LLM 独立开关，语义与 use_llm_event_parser 一致
+    # （None = 跟随 use_llm；True/False = 显式覆盖）。
+    use_llm_selector: bool | None = None
+    # 选人阶段大模型重排前的规则初选候选上限，默认 15；<=0 表示关闭初选。
+    selector_candidate_limit: int | None = Field(default=15, ge=0)
+    # 第十四轮：**页面路径**的节点正文 LLM 开关，默认关闭。
+    # 关闭后不再为每个数字人生成社交媒体发帖正文，节点正文走已有的规则兜底
+    # （字段照旧输出，只是内容来源是规则而不是 LLM），单事件可省约 6~7s。
+    # 需要复现"正文也用 LLM"的旧行为时显式传 true 即可；CLI / run_eval /
+    # ablation 等其它入口不受这个开关影响，仍保持原行为。
+    use_llm_content: bool = False
     event_limit: int | None = Field(default=None, ge=1)
     event_id: str | None = None
 
@@ -125,8 +145,79 @@ class RunStatus(BaseModel):
     errors: list[dict[str, Any]] = Field(default_factory=list)
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    """读布尔开关：进程环境变量优先，其次项目根目录的 .env。
+
+    项目的 LLM 配置本来就在 .env 里（不在进程环境里），只查 os.environ
+    会让 .env 里的开关永远读不到。
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        raw = read_env_values(PROJECT_ROOT).get(name)
+    raw = (raw or "").strip().lower()
+    if not raw:
+        return default
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _warmup_llm_model() -> None:
+    """第十五轮：服务启动时把本地模型加载进内存，消除"首次点击必冷"。
+
+    实测（本机 qwen3:8b / Ollama 0.40.10）：模型未加载时一次请求要多花
+    3.5~6.5s 的加载时间；且 Ollama 默认只驻留 5 分钟，空闲超时后会再次卸载
+    （A 组实测：连续 3.5s → 空闲 5.5 分钟后 10.77s）。
+
+    做法只是"发一次极小请求让模型加载"，配合 ``LLM_KEEP_ALIVE`` 让它常驻，
+    **不改动任何选人逻辑**。两个前置条件同时满足才执行：
+    配置了 ``LLM_KEEP_ALIVE``（否则加载完 5 分钟后照样卸载，白白占用显存），
+    且 ``LLM_WARMUP_ON_STARTUP`` 未显式关闭（默认关闭，需在本机 .env 开启）。
+
+    失败时打印到 stderr 并继续（服务本身可用，后续真实请求会照常报错），
+    不做静默吞异常。
+    """
+    if not _env_flag("LLM_WARMUP_ON_STARTUP", default=False):
+        print("[warmup] LLM_WARMUP_ON_STARTUP 未开启，跳过模型预热", file=sys.stderr)
+        return
+    client = OpenAICompatibleLLMClient.from_env_files(PROJECT_ROOT)
+    if client is None:
+        print("[warmup] 未配置 LLM，跳过模型预热", file=sys.stderr)
+        return
+    if client.keep_alive is None:
+        print(
+            "[warmup] 未配置 LLM_KEEP_ALIVE，跳过预热（加载后 5 分钟仍会卸载）",
+            file=sys.stderr,
+        )
+        return
+    started = time.monotonic()
+    client.generate_json(
+        system_prompt="只输出 JSON 对象，不要输出其它文字。",
+        user_prompt='只输出：{"ok":true}',
+    )
+    print(
+        f"[warmup] 模型已加载并常驻（keep_alive={client.keep_alive}），"
+        f"耗时 {time.monotonic() - started:.2f}s",
+        file=sys.stderr,
+    )
+
+
+def _build_lifespan():
+    """服务启动钩子：把模型预热放到后台线程，不阻塞启动与 /api/health。"""
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):  # pragma: no cover - 启动副作用
+        threading.Thread(target=_warmup_llm_model, name="llm-warmup", daemon=True).start()
+        yield
+
+    return lifespan
+
+
 def create_app() -> FastAPI:
-    app = FastAPI(title="Influence Strategy Web Console", version="0.1.0")
+    app = FastAPI(
+        title="Influence Strategy Web Console",
+        version="0.1.0",
+        lifespan=_build_lifespan(),
+    )
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -728,6 +819,11 @@ def _run_events_job(*, run_id: str, events: list[dict[str, Any]], options: RunOp
                     max_frequency_per_day=options.max_frequency_per_day,
                     allowed_platforms=options.allowed_platforms,
                     use_llm=options.use_llm,
+                    use_llm_event_parser=options.use_llm_event_parser,
+                    use_llm_selector=options.use_llm_selector,
+                    selector_candidate_limit=options.selector_candidate_limit,
+                    # 第十四轮：页面测试控制台不再为每个数字人生成发帖正文。
+                    use_llm_content=options.use_llm_content,
                     trace_dir=effective_trace_dir,
                 )
             else:
@@ -742,6 +838,11 @@ def _run_events_job(*, run_id: str, events: list[dict[str, Any]], options: RunOp
                     max_frequency_per_day=options.max_frequency_per_day,
                     allowed_platforms=options.allowed_platforms,
                     use_llm=options.use_llm,
+                    use_llm_event_parser=options.use_llm_event_parser,
+                    use_llm_selector=options.use_llm_selector,
+                    selector_candidate_limit=options.selector_candidate_limit,
+                    # 第十四轮：页面测试控制台不再为每个数字人生成发帖正文。
+                    use_llm_content=options.use_llm_content,
                     trace_dir=effective_trace_dir,
                     target_user_id=options.target_user_id,
                     dispatch_platform=options.dispatch_platform
@@ -1258,6 +1359,11 @@ def _run_benchmark_job(
                     max_frequency_per_day=options.max_frequency_per_day,
                     allowed_platforms=options.allowed_platforms,
                     use_llm=options.use_llm,
+                    use_llm_event_parser=options.use_llm_event_parser,
+                    use_llm_selector=options.use_llm_selector,
+                    selector_candidate_limit=options.selector_candidate_limit,
+                    # 第十四轮：页面压测同样不生成发帖正文，避免每轮多一次 LLM。
+                    use_llm_content=options.use_llm_content,
                     trace_dir=iter_trace_dir,
                 )
             else:
@@ -1272,6 +1378,11 @@ def _run_benchmark_job(
                     max_frequency_per_day=options.max_frequency_per_day,
                     allowed_platforms=options.allowed_platforms,
                     use_llm=options.use_llm,
+                    use_llm_event_parser=options.use_llm_event_parser,
+                    use_llm_selector=options.use_llm_selector,
+                    selector_candidate_limit=options.selector_candidate_limit,
+                    # 第十四轮：页面压测同样不生成发帖正文，避免每轮多一次 LLM。
+                    use_llm_content=options.use_llm_content,
                     trace_dir=iter_trace_dir,
                     target_user_id=options.target_user_id,
                     dispatch_platform=options.dispatch_platform

@@ -113,6 +113,35 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="启用大语言模型增强能力。",
     )
 
+    # 第十轮：事件解析阶段的 LLM 默认 **off**（生产运行默认走规则解析）。
+    # 理由见 pipeline.DEFAULT_USE_LLM_EVENT_PARSER：这次调用占全链路约 47%，
+    # 而在固定事件上产出与规则解析几乎一致；规则解析处理自由文本，
+    # 因此仍然接受任意新事件。想做对照实验时显式给 on 即可恢复。
+    parser.add_argument(
+        "--event-parser-llm",
+        choices=["on", "off"],
+        default="off",
+        help="单独控制事件解析阶段是否调用大模型，默认 off（走规则解析）。",
+    )
+
+    # 选人阶段的 LLM 独立开关。语义与 --event-parser-llm 一致：
+    # None 跟随 --use-llm；显式 on/off 才覆盖，因此可以做到
+    # "事件解析用 LLM、选人走纯规则" 这类组合。
+    parser.add_argument(
+        "--selector-llm",
+        choices=["on", "off"],
+        help="单独控制选人阶段是否调用大模型，默认跟随 --use-llm。",
+    )
+
+    # 规则初选上限：先用规则把候选收敛到 N 人，再交给选人阶段的大模型重排。
+    # 默认 15。给 0 或负数表示关闭初选（退回原有整体候选池）。
+    parser.add_argument(
+        "--selector-candidate-limit",
+        type=int,
+        default=15,
+        help="选人阶段大模型重排前的规则初选候选上限，默认 15。",
+    )
+
     return parser
 
 
@@ -280,6 +309,14 @@ def main() -> int:
 
         # 新增：将命令行参数传给流水线
         use_llm=args.use_llm,
+        # 第十轮：CLI 显式给值（默认 off），不再传 None 让流水线去猜。
+        use_llm_event_parser=args.event_parser_llm == "on",
+        use_llm_selector=(
+            None
+            if args.selector_llm is None
+            else args.selector_llm == "on"
+        ),
+        selector_candidate_limit=args.selector_candidate_limit,
     )
 
     output_path = (

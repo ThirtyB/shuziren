@@ -127,6 +127,8 @@ class StrategyGenerator:
             ),
             status=status,
             status_reason=status_reason,
+            dispatch_platform=selection_result.summary.dispatch_platform,
+            target_platform=selection_result.summary.target_platform,
         )
 
         return StrategyResult(
