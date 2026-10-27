@@ -10,10 +10,20 @@ readme = "README.md"
 requires-python = ">=3.11"
 
 [project.optional-dependencies]
+# BGE 语义编码的**运行期**依赖（ONNX 推理路径）。
+# 走这条路就不需要安装 torch / transformers，首次加载从约 9s 降到约 1s。
+# 没有 ONNX 产物时会自动回退 torch 路径，因此这两项缺失也不会报错。
+semantic = ["onnxruntime>=1.16", "tokenizers>=0.15"]
+
 # 图像事件输入的本地 OCR（纯 ONNX，不需要 GPU，也不依赖任何大模型）。
 # 未安装时图像识别会返回 method="unrecognized" 而不是报错中断。
-#   pip install -e ".[ocr]"
 ocr = ["rapidocr_onnxruntime>=1.4", "Pillow>=10"]
+
+# 仅在**离线导出/预计算**时需要（运行期不需要）：
+#   scripts/export_bge_onnx.py  导出 ONNX（需 torch + transformers + onnx）
+#   scripts/build_local_models.py  预计算节点向量与 GraphSAGE
+#   pip install -e ".[export]"
+export = ["torch>=2.0", "transformers>=4.30", "onnx>=1.15", "onnxscript"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

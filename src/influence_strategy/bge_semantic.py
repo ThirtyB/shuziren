@@ -47,6 +47,11 @@ DEFAULT_BATCH_SIZE = 64
 #: 截断长度。节点文本是「兴趣×3 + 简介」，96 token 足够覆盖，超长部分收益很低。
 DEFAULT_MAX_LENGTH = 96
 
+#: ONNX 产物目录后缀（``<model>-onnx/``），由 ``scripts/export_bge_onnx.py`` 生成。
+#: 存在时运行期走 onnxruntime + tokenizers，不再 import torch / transformers ——
+#: 首次调用从约 9s 降到约 2s。不存在时自动回退 torch 路径，行为不变。
+ONNX_SUFFIX = "-onnx"
+
 
 class BGESemanticEncoder:
     """基于 BGE-small-zh 的语义编码器。"""
@@ -68,19 +73,65 @@ class BGESemanticEncoder:
         self._tokenizer: Any = None
         self._model: Any = None
         self._torch: Any = None
+        # ONNX 推理通道：onnxruntime Session + tokenizers Tokenizer。
+        # 存在 ONNX 产物时走这条，完全不 import torch / transformers。
+        self._session: Any = None
+        self._onnx_tokenizer: Any = None
         self._index: SemanticIndex | None = None
         self._id_to_row: dict[str, int] = {}
 
     # ---------------- 模型装载 ----------------
 
+    def _onnx_dir(self) -> Path | None:
+        """定位 ONNX 产物目录（与 torch 模型目录同级，带 ``-onnx`` 后缀）。
+
+        不存在则返回 ``None``，此时回退到 torch + transformers。这样"还没跑过
+        导出脚本"的环境依然能正常工作，不会因为缺 ONNX 而报错。
+        """
+
+        if self.model_dir is None:
+            return None
+        base = Path(self.model_dir)
+        candidate = base.with_name(base.name + ONNX_SUFFIX)
+        if (candidate / "model.onnx").exists() and (candidate / "tokenizer.json").exists():
+            return candidate
+        return None
+
+    def _ensure_onnx(self, onnx_dir: Path) -> None:
+        """加载 ONNX 图 + 原生分词器（都不依赖 torch / transformers）。"""
+
+        import onnxruntime as ort
+        from tokenizers import Tokenizer
+
+        tokenizer = Tokenizer.from_file(str(onnx_dir / "tokenizer.json"))
+        tokenizer.enable_truncation(max_length=self.max_length)
+        # 必须补齐到**定长**：导出的图在序列维上是静态的（只有 batch 维动态）。
+        pad_id = tokenizer.token_to_id("[PAD]")
+        tokenizer.enable_padding(
+            pad_id=pad_id if pad_id is not None else 0,
+            pad_token="[PAD]",
+            length=self.max_length,
+        )
+        session = ort.InferenceSession(
+            str(onnx_dir / "model.onnx"), providers=["CPUExecutionProvider"]
+        )
+        self._onnx_tokenizer = tokenizer
+        self._session = session
+        logger.info("BGE 模型已加载 (ONNX): %s", onnx_dir)
+
     def _ensure_model(self) -> None:
-        if self._model is not None:
+        if self._model is not None or self._session is not None:
             return
         if self.model_dir is None or not Path(self.model_dir).exists():
             raise FileNotFoundError(
                 f"BGE 模型目录不存在: {self.model_dir}。"
                 "请先运行 scripts/download_bge.py 或改回 SVD 后端。"
             )
+
+        onnx_dir = self._onnx_dir()
+        if onnx_dir is not None:
+            self._ensure_onnx(onnx_dir)
+            return
 
         import torch
         from transformers import AutoModel, AutoTokenizer
@@ -104,15 +155,48 @@ class BGESemanticEncoder:
 
     # ---------------- 编码 ----------------
 
+    @staticmethod
+    def _prepare(texts: Sequence[str], *, is_query: bool, use_instruction: bool) -> list[str]:
+        """给 query 加指令前缀（BGE 官方推荐的检索用法）。"""
+
+        prepared = list(texts)
+        if is_query and use_instruction:
+            prepared = [QUERY_INSTRUCTION + text for text in prepared]
+        return prepared
+
     def _encode_batch(self, texts: Sequence[str], *, is_query: bool) -> np.ndarray:
         """批量编码，返回 L2 归一化后的 float32 矩阵。"""
 
         self._ensure_model()
-        torch = self._torch
+        if self._session is not None:
+            return self._encode_onnx(texts, is_query=is_query)
+        return self._encode_torch(texts, is_query=is_query)
 
-        prepared = list(texts)
-        if is_query and self.use_query_instruction:
-            prepared = [QUERY_INSTRUCTION + text for text in prepared]
+    def _encode_onnx(self, texts: Sequence[str], *, is_query: bool) -> np.ndarray:
+        """ONNX 推理路径：onnxruntime + tokenizers，不触碰 torch。"""
+
+        prepared = self._prepare(
+            texts, is_query=is_query, use_instruction=self.use_query_instruction
+        )
+        encoded = self._onnx_tokenizer.encode_batch(prepared)
+        feeds = {
+            "input_ids": np.array([item.ids for item in encoded], dtype=np.int64),
+            "attention_mask": np.array([item.attention_mask for item in encoded], dtype=np.int64),
+            "token_type_ids": np.array([item.type_ids for item in encoded], dtype=np.int64),
+        }
+        hidden = self._session.run(["last_hidden_state"], feeds)[0]
+        # BGE 用 [CLS] 作为句向量（不是 mean pooling）。
+        embedding = hidden[:, 0].astype(np.float32)
+        norms = np.linalg.norm(embedding, axis=-1, keepdims=True)
+        return embedding / np.maximum(norms, 1e-12)
+
+    def _encode_torch(self, texts: Sequence[str], *, is_query: bool) -> np.ndarray:
+        """torch / transformers 推理路径（无 ONNX 产物时的回退）。"""
+
+        torch = self._torch
+        prepared = self._prepare(
+            texts, is_query=is_query, use_instruction=self.use_query_instruction
+        )
 
         batch = self._tokenizer(
             prepared,
