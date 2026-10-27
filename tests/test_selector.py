@@ -63,8 +63,8 @@ def _build_targeted_fixture():
                 "user_name": "user_1",
                 "user_followers": 1200,
                 "user_friends": 80,
-                "user_interests": ["亲子阅读", "英语启蒙"],
-                "user_description": "专注亲子阅读和英语启蒙",
+                "user_interests": ["人工智能", "数据安全"],
+                "user_description": "专注人工智能和数据安全监管",
                 "platform": "facebook_simulated",
             },
             "2": {
@@ -72,7 +72,7 @@ def _build_targeted_fixture():
                 "user_name": "user_2",
                 "user_followers": 350,
                 "user_friends": 40,
-                "user_interests": ["转发传播", "阅读活动"],
+                "user_interests": ["算法治理", "平台监管"],
                 "user_description": "适合扩散",
                 "platform": "facebook_simulated",
             },
@@ -81,7 +81,7 @@ def _build_targeted_fixture():
                 "user_name": "user_3",
                 "user_followers": 180,
                 "user_friends": 25,
-                "user_interests": ["亲子问答", "教育交流"],
+                "user_interests": ["数据合规", "网络安全"],
                 "user_description": "擅长评论互动与答疑",
                 "platform": "instagram_simulated",
             },
@@ -176,7 +176,7 @@ def _build_targeted_fixture():
         loader = DataLoader(root)
         event = RuleBasedEventParser().parse(
             {
-                "event_description": "围绕亲子阅读和英语启蒙做一次传播活动，提升讨论度并控制风险。",
+                "event_description": "围绕人工智能治理和数据安全监管做一次传播活动，提升讨论度并控制风险。",
                 "constraints": {"max_selected_nodes": 3},
             }
         )
@@ -268,7 +268,8 @@ class SelectorTest(unittest.TestCase):
             self.assertIn("selection_bucket", primary_frame.columns)
             self.assertIn("selection_bucket", fallback_frame.columns)
 
-    def test_selector_can_apply_llm_rerank_plan(self) -> None:
+    def test_selector_ignores_llm_rerank_plan(self) -> None:
+        """LLM 选人指导暂时不参与：身份完全由指标与配额决定，保证可复现。"""
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             raw_dir = root / "data" / "raw"
@@ -356,7 +357,7 @@ class SelectorTest(unittest.TestCase):
             loader = DataLoader(root)
             event = RuleBasedEventParser().parse(
                 {
-                    "event_description": "围绕阅读讨论做一次传播活动，重点做好互动承接。",
+                    "event_description": "围绕人工智能治理讨论做一次传播活动，重点做好互动承接。",
                     "constraints": {"max_selected_nodes": 2},
                 }
             )
@@ -374,13 +375,14 @@ class SelectorTest(unittest.TestCase):
                 llm_client=FakeSelectorLLMClient(),
             )
 
-            self.assertEqual(
-                selection_result.selected_nodes[0].selected_role, "interaction_response_node"
-            )
-            self.assertTrue(
+            # max_selected=2 → 首发 1 + 扩散 1（互动/支持为 0），与 LLM 建议无关
+            roles = [node.selected_role for node in selection_result.selected_nodes]
+            self.assertEqual(roles, ["core_publish_node", "amplification_node"])
+            self.assertFalse(
                 any(
                     reason.startswith("llm_selector=")
-                    for reason in selection_result.selected_nodes[0].selection_reasons
+                    for node in selection_result.selected_nodes
+                    for reason in node.selection_reasons
                 )
             )
 

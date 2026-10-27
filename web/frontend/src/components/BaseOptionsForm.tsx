@@ -23,6 +23,17 @@ export type BaseOptionsFormProps = {
     * 数字人 / dispatchPlatform / platform_specs 推断），仅 BatchEval
     * 因为内嵌多模式共享而保留可见。默认 true。 */
   showAllowedPlatforms?: boolean;
+  /** 是否渲染"风险等级 / 频率上限 / Profile 限制"这些进阶参数。
+    *
+    * 多人协同分发下用户只需要指定**平台 + 小队人数 + 时间窗口**，其余项保持
+    * 默认值即可，全部铺开反而让人无从下手。默认 true——单人 / 跨平台 /
+    * BatchEval 场景仍保持原样。 */
+  showAdvancedOptions?: boolean;
+  /** 是否渲染"传播窗口"（整场活动的时间跨度，小时）。
+    *
+    * 时间窗口是用户要直接掌控的参数，所以独立于 ``showAdvancedOptions``：
+    * 多人场景只收起进阶项，窗口照常保留。默认 true。 */
+  showCampaignWindow?: boolean;
 };
 
 /**
@@ -51,6 +62,8 @@ export function BaseOptionsForm(props: BaseOptionsFormProps) {
     setAllowedPlatforms,
     showMaxSelectedNodes = true,
     showAllowedPlatforms = true,
+    showAdvancedOptions = true,
+    showCampaignWindow = true,
   } = props;
 
   return (
@@ -67,46 +80,52 @@ export function BaseOptionsForm(props: BaseOptionsFormProps) {
           />
         </label>
       )}
-      <label>
-        风险等级
-        <select
-          value={riskLevel}
-          onChange={(event) => setRiskLevel(event.target.value)}
-        >
-          <option value="">自动</option>
-          <option value="low">low</option>
-          <option value="medium">medium</option>
-          <option value="high">high</option>
-        </select>
-      </label>
-      <label>
-        传播窗口
-        <input
-          type="number"
-          min={1}
-          max={168}
-          value={campaignWindowHours}
-          onChange={(event) => setCampaignWindowHours(Number(event.target.value))}
-        />
-      </label>
-      <label>
-        频率上限
-        <input
-          type="number"
-          min={1}
-          max={24}
-          value={maxFrequencyPerDay}
-          onChange={(event) => setMaxFrequencyPerDay(Number(event.target.value))}
-        />
-      </label>
-      <label>
-        Profile 限制
-        <input
-          value={profileLimit}
-          onChange={(event) => setProfileLimit(event.target.value)}
-          placeholder="留空加载全部"
-        />
-      </label>
+      {showCampaignWindow && (
+        <label>
+          传播窗口（小时）
+          <input
+            type="number"
+            min={1}
+            max={168}
+            value={campaignWindowHours}
+            onChange={(event) => setCampaignWindowHours(Number(event.target.value))}
+          />
+        </label>
+      )}
+      {showAdvancedOptions && (
+        <>
+          <label>
+            风险等级
+            <select
+              value={riskLevel}
+              onChange={(event) => setRiskLevel(event.target.value)}
+            >
+              <option value="">自动</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
+          </label>
+          <label>
+            频率上限
+            <input
+              type="number"
+              min={1}
+              max={24}
+              value={maxFrequencyPerDay}
+              onChange={(event) => setMaxFrequencyPerDay(Number(event.target.value))}
+            />
+          </label>
+          <label>
+            Profile 限制
+            <input
+              value={profileLimit}
+              onChange={(event) => setProfileLimit(event.target.value)}
+              placeholder="留空加载全部"
+            />
+          </label>
+        </>
+      )}
       {showAllowedPlatforms && (
         <label className="wide">
           候选人平台（评分/选人池）

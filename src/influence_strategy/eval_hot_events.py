@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import itertools
 import json
 import logging
+import random
 import shutil
 import threading
 import time
@@ -10,6 +12,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Literal, Sequence
 
+from .content_arsenal import (
+    AmmoVectorIndex,
+    ContentArsenal,
+    _arsenal_fingerprint,
+    _stable_seed,
+)
 from .llm_client import LLMClientError, OpenAICompatibleLLMClient
 from .models import (
     FeatureBuildSummary,
@@ -1227,14 +1235,16 @@ def build_eval_output(
         llm_client=llm_client,
     )
 
-    node_outputs, post_refs, _ = _build_node_outputs(
-        hot_event=hot_event,
+    # 多人协同：按「首发期 → 互动期 → 扩散期 → 支持期」编排，动作只有
+    # 发帖 / 评论 / 点赞 / 转发 四种，文案一律从弹药库取最相关的一条。
+    node_outputs, post_refs, _ = _build_staged_node_outputs(
         strategy_result=strategy_result,
         selected_nodes=selected_nodes,
-        target=target,
+        platform=output_platform,
+        hot_event=hot_event,
         variants=variants,
         llm_overrides=llm_overrides,
-        platform_for=lambda node: output_platform,
+        workspace_root=workspace_root,
     )
 
     five_dimension_strategy = _build_five_dimension_strategy(
@@ -1245,6 +1255,7 @@ def build_eval_output(
         target=target,
         post_refs=post_refs,
         node_outputs=node_outputs,
+        max_actions_per_node=None,
     )
 
     five_dimension_strategy["内容"]["内容生成诊断"] = _compact_content_llm_meta(content_llm_meta)
@@ -1407,6 +1418,610 @@ def _build_node_outputs(
     return node_outputs, post_refs, publish_action_ids
 
 
+# --------------------------------------------------------------------------- #
+# 多人协同（单平台）：按时期编排的动作生成
+# --------------------------------------------------------------------------- #
+# 与 ``_build_node_outputs`` 的两点本质差别：
+#   1) 动作类型收敛为四种 —— 发帖 / 评论 / 点赞 / 转发；
+#   2) 动作按**时期**组织，而不是"每个节点四个"：后一时期的评论、点赞、转发
+#      都通过「依赖动作」指向前一时期已经产生的动作，形成真正的传播链。
+
+#: 四种允许的动作。
+ACTION_PUBLISH = ("publish_post", "发布主帖")
+ACTION_COMMENT = ("comment_post", "评论帖子")
+ACTION_LIKE = ("like_post", "点赞帖子")
+ACTION_REPOST = ("repost_post", "转发帖子")
+
+#: 动作类型 → 统计用的中文名。
+ACTION_TYPE_LABELS = {
+    "publish_post": "发帖",
+    "comment_post": "评论",
+    "like_post": "点赞",
+    "repost_post": "转发",
+}
+
+#: 弹药语义分下限。低于此值视为"没有合适内容"，只转发、不附文案。
+#: 实测同类弹药 p50≈0.45、最低≈0.26；0.30 与项目既有的 BGE 语义门槛一致。
+ARSENAL_MIN_SCORE = 0.30
+
+#: 取消点赞的概率：风险越高越倾向放弃这一次点赞（保守发声）。
+LIKE_SKIP_PROBABILITY = {"low": 0.10, "medium": 0.20, "high": 0.35}
+
+#: 执行阶段 → 时期显示名（与 ``StrategyGenerator._build_time_plan`` 四段对应）。
+STAGE_LABELS = {
+    "stage_1_launch": "首发期",
+    "stage_2_engage": "互动期",
+    "stage_3_amplify": "扩散期",
+    "stage_2_support": "支持期",
+}
+
+#: 节点角色 → 中文显示名（数字人职责）。
+ROLE_LABELS = {
+    "core_publish_node": "首发节点",
+    "interaction_response_node": "互动节点",
+    "amplification_node": "扩散节点",
+    "support_node": "支持节点",
+}
+
+#: 节点角色 → 职责说明（一句话讲清这个人在传播链里干什么）。
+ROLE_RESPONSIBILITY = {
+    "core_publish_node": "首发期发布主帖，奠定舆论基调与核心叙事",
+    "interaction_response_node": "互动期评论 / 点赞首发帖，引导并承接讨论",
+    "amplification_node": "扩散期转发扩声量，推动二次传播",
+    "support_node": "支持期补充背景、转发扩散，承接并延续热度",
+}
+
+#: 节点角色排序：给数字人分配统一编号（首发 → 互动 → 扩散 → 支持）时按此序。
+ROLE_ORDER = {
+    "core_publish_node": 0,
+    "interaction_response_node": 1,
+    "amplification_node": 2,
+    "support_node": 3,
+}
+
+#: 动作类型 → 中文名（阶段统计用）。
+ACTION_TYPE_LABELS_FALLBACK = {
+    "publish_post": "发帖",
+    "comment_post": "评论",
+    "like_post": "点赞",
+    "repost_post": "转发",
+}
+
+#: 需要展示正文的动作类型（发帖 / 评论 / 转发）。点赞无正文，不进入内容清单。
+_CONTENT_ACTION_TYPES = ("publish_post", "comment_post", "repost_post")
+
+
+def _encode_corpus(encoder: Any, texts: list[str], *, is_query: bool) -> Any:
+    """批量编码，兼容 BGE（有 ``_encode_batch``）与 SVD（只有单条 ``encode``）。"""
+
+    if hasattr(encoder, "_encode_batch"):
+        return encoder._encode_batch(texts, is_query=is_query)
+    import numpy as np
+
+    return np.stack([encoder.encode(text) for text in texts])
+
+
+def _arsenal_semantics(
+    workspace_root: str | Path | None,
+    event_text: str,
+) -> tuple[Any, Any] | None:
+    """返回 ``(编码器, 事件向量)``，无本地模型时返回 None。
+
+    事件文本只编码 1 条（毫秒级）；弹药向量走离线预计算索引，不再实时编码。
+    """
+
+    if not workspace_root or not event_text.strip():
+        return None
+    try:
+        from .local_models import load_local_models
+    except ImportError:
+        return None
+
+    local_models = load_local_models(workspace_root)
+    if local_models is None:
+        return None
+    try:
+        event_vector = _encode_corpus(local_models.encoder, [event_text], is_query=True)[0]
+    except Exception:  # pragma: no cover - 模型损坏时退化为无语义信号
+        logger.warning("弹药语义打分不可用，退化为按类目选取", exc_info=True)
+        return None
+    return local_models.encoder, event_vector
+
+
+def _ammo_scores(
+    texts: list[str],
+    *,
+    semantics: tuple[Any, Any] | None,
+    arsenal: ContentArsenal,
+) -> list[float]:
+    """给一批弹药文本打语义分。
+
+    优先用**离线预计算**的向量（``ammo_vectors.npz``）：只做一次矩阵乘法，
+    毫秒级。文件缺失或指纹与弹药库不一致时，才回退到实时编码整个池
+    （BGE on CPU 约 8 秒）。
+    """
+
+    if semantics is None:
+        return [0.0] * len(texts)
+
+    encoder, event_vector = semantics
+    if arsenal.source_dir is not None:
+        index = AmmoVectorIndex.load(
+            arsenal.source_dir,
+            expected_fingerprint=_arsenal_fingerprint(
+                item["text"] for item in arsenal.items
+            ),
+        )
+        if index is not None:
+            position = {text: i for i, text in enumerate(index.texts)}
+            if all(text in position for text in texts):
+                all_scores = index.scores(event_vector)
+                return [all_scores[position[text]] for text in texts]
+
+    docs = _encode_corpus(encoder, texts, is_query=False)
+    return (docs @ event_vector).tolist()
+
+
+def _build_ammo_ranking(
+    arsenal: ContentArsenal,
+    *,
+    event_type: str,
+    semantics: tuple[Any, Any] | None,
+) -> list[tuple[str, float]]:
+    """对整个弹药池一次性打分，返回 ``(文本, 语义分)`` 的降序列表。
+
+    池子的分数只取决于事件本身，跟"取第几条"无关，所以这里**只算一次**；
+    之后每次取文案都在这份排序结果上顺序扫描。早期实现是每次取文案都把整个
+    池子重新编码一遍——10 人的编排大约会重复编码 7000 条，是主要性能瓶颈。
+    """
+
+    pool = [item for item in arsenal.items if event_type in (item.get("event_types") or ())]
+    if not pool:
+        pool = arsenal.items
+    if not pool:
+        return []
+
+    texts = [item["text"] for item in pool]
+    scores = _ammo_scores(texts, semantics=semantics, arsenal=arsenal)
+    return sorted(zip(texts, scores), key=lambda pair: pair[1], reverse=True)
+
+
+def _pick_ammo_texts(
+    ranking: list[tuple[str, float]],
+    *,
+    count: int,
+    exclude: set[str],
+    min_score: float | None,
+) -> list[tuple[str, float]]:
+    """从已排好序的弹药里取 ``count`` 条最相关且未使用过的。
+
+    ``min_score`` 非 None 时，语义分低于它的视为没有合适内容，返回空串
+    （转发文案留空）。ranking 已降序，遇到第一条低于门槛即可停止。
+    """
+
+    if count <= 0:
+        return []
+
+    picked: list[tuple[str, float]] = []
+    for text, score in ranking:
+        if text in exclude:
+            continue
+        if min_score is not None and score < min_score:
+            break
+        exclude.add(text)
+        picked.append((text, float(score)))
+        if len(picked) >= count:
+            break
+    while len(picked) < count:
+        picked.append(("", 0.0))
+    return picked
+
+
+def _count_actions(actions: list[dict[str, Any]]) -> dict[str, int]:
+    """统计一个节点各类动作的数量。
+
+    这是动作清单编排**完成之后**的实际统计，不是预置的频率上限——频率不再
+    用于限制动作生成，只是把每个人实际做了多少事如实反映出来。
+    """
+
+    counts = {label: 0 for label in ACTION_TYPE_LABELS.values()}
+    for action in actions:
+        label = ACTION_TYPE_LABELS.get(str(action.get("动作类型", "")))
+        if label:
+            counts[label] += 1
+    counts["合计"] = len(actions)
+    return counts
+
+
+def _should_skip_like(actor_id: str, target_ref: str, risk_level: str) -> bool:
+    """按风险等级概率性取消一次点赞。
+
+    种子取 ``(执行主体, 目标帖子)``，保证同一份输入每次运行结果一致。
+    """
+
+    probability = LIKE_SKIP_PROBABILITY.get(risk_level, LIKE_SKIP_PROBABILITY["medium"])
+    roll = random.Random(_stable_seed("like", actor_id, target_ref)).random()
+    return roll < probability
+
+
+def _arsenal_event_text(strategy_result: StrategyResult) -> str:
+    """用于弹药语义打分的事件文本。"""
+
+    event = strategy_result.event
+    return " ".join(
+        part
+        for part in (event.event_title, event.event_description, *event.extracted_keywords)
+        if part
+    )
+
+
+def _build_staged_node_outputs(
+    *,
+    strategy_result: StrategyResult,
+    selected_nodes: list[StrategyNodePlan],
+    platform: str,
+    hot_event: dict[str, Any] | None = None,
+    variants: list[str] | None = None,
+    llm_overrides: dict[str, dict[str, str]] | None = None,
+    workspace_root: str | Path | None = None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, str], dict[str, str]]:
+    """多人协同（单平台）按四个时期编排动作。
+
+    ``(首发期 → 互动期 → 扩散期 → 支持期)``：
+
+    * 首发期：首发节点各发一次帖，文案取弹药库最相关的一条；
+    * 互动期：非首发节点点赞**全部**首发帖；互动节点对每个首发帖评论，
+      文案互不重复；
+    * 扩散期：扩散节点转发（一次扩散），其余节点对转发点赞；随后支持节点
+      转发一次扩散的结果（二次扩散），其余节点再点赞；
+    * 支持期：互动节点以自己的评论内容发帖，扩散 / 支持节点取弹药发帖。
+    """
+
+    by_role: dict[str, list[StrategyNodePlan]] = {}
+    for node in selected_nodes:
+        by_role.setdefault(node.selected_role, []).append(node)
+    launch_nodes = by_role.get("core_publish_node", [])
+    interact_nodes = by_role.get("interaction_response_node", [])
+    amplify_nodes = by_role.get("amplification_node", [])
+    support_nodes = by_role.get("support_node", [])
+
+    event_type = strategy_result.event.event_type
+    arsenal = ContentArsenal.load(workspace_root)
+    semantics = _arsenal_semantics(workspace_root, _arsenal_event_text(strategy_result))
+    # 弹药池只在这里打分一次；后面每次取文案都复用这份排序结果。
+    ammo_ranking = _build_ammo_ranking(arsenal, event_type=event_type, semantics=semantics)
+    ammo_min_score = ARSENAL_MIN_SCORE if semantics is not None else None
+    time_plan = strategy_result.strategy.time_plan
+
+    actions_by_node: dict[str, list[dict[str, Any]]] = {
+        node.user_id: [] for node in selected_nodes
+    }
+    post_refs: dict[str, str] = {}
+    publish_action_ids: dict[str, str] = {}
+    used_texts: set[str] = set()
+    counter = itertools.count(1)
+
+    def emit(
+        node: StrategyNodePlan,
+        kind: tuple[str, str],
+        stage: str,
+        trigger: str,
+        target: dict[str, Any],
+        depends_on: list[str],
+        creates: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        seq = next(counter)
+        label = STAGE_LABELS.get(stage, stage)
+        action = _compact_action(
+            action_id=f"A{seq:03d}",
+            seq=seq,
+            actor_id=node.user_id,
+            action_group=label,
+            action_type=kind[0],
+            action_name=kind[1],
+            platform=platform,
+            stage=f"{label} {time_plan.get(stage, '')}".strip(),
+            trigger_condition=trigger,
+            target=target,
+            depends_on=list(depends_on),
+            creates=creates,
+            payload=payload,
+        )
+        actions_by_node[node.user_id].append(action)
+        return action
+
+    variant_pool = list(variants or [])
+    event_title = str(
+        (hot_event or {}).get("event_title") or strategy_result.event.event_title or ""
+    )
+    event_summary = str(
+        (hot_event or {}).get("event_summary") or strategy_result.event.event_description or ""
+    )
+
+    def ammo(count: int = 1) -> list[tuple[str, float]]:
+        return _pick_ammo_texts(
+            ammo_ranking,
+            count=count,
+            exclude=used_texts,
+            min_score=ammo_min_score,
+        )
+
+    def text_or_fallback(picked: str, node: StrategyNodePlan, node_index: int) -> str:
+        """文案优先级：弹药库 → LLM 生成 → 规则占位文本。
+
+        弹药库取不到（库为空或语义分过低）时依次后退，保证发帖/评论的文案
+        不为空。转发是唯一允许留空的动作（语义分过低就只转不附文案），因此
+        只有发帖与评论走这里。
+        """
+
+        if picked:
+            return picked
+        llm_text = str((llm_overrides or {}).get(node.user_id, {}).get("post_content") or "").strip()
+        if llm_text:
+            return llm_text
+        return _post_content_text(
+            node=node,
+            node_index=node_index,
+            event_title=event_title,
+            event_summary=event_summary,
+            variants=variant_pool,
+        )
+
+    # ① 首发期：每个首发节点发一次帖
+    launch_posts: list[tuple[str, str, str, float]] = []
+    for index, node in enumerate(launch_nodes, start=1):
+        text, score = ammo()[0]
+        text = text_or_fallback(text, node, index)
+        ref = f"P{index:03d}"
+        post_refs[node.user_id] = ref
+        action = emit(
+            node,
+            ACTION_PUBLISH,
+            "stage_1_launch",
+            trigger="进入首发期后立即执行",
+            target=_post_target(ref, node.user_id, "本节点首发帖"),
+            depends_on=[],
+            creates={"post_ref": ref, "post_type": "anchor_post"},
+            payload={"正文草案": text, "弹药语义分": round(score, 4)},
+        )
+        publish_action_ids[node.user_id] = action["动作编号"]
+        launch_posts.append((node.user_id, ref, action["动作编号"], score))
+
+    # ② 互动期：非首发节点点赞全部首发帖
+    for owner_id, ref, action_id, _score in launch_posts:
+        for node in selected_nodes:
+            if node.selected_role == "core_publish_node":
+                continue
+            if _should_skip_like(node.user_id, ref, node.risk_level):
+                continue
+            emit(
+                node,
+                ACTION_LIKE,
+                "stage_2_engage",
+                trigger="首发帖出现后执行",
+                target=_post_target(ref, owner_id, f"数字人 {owner_id} 的首发帖"),
+                depends_on=[action_id],
+                creates={},
+                payload={"跳过原因": ""},
+            )
+
+    # ② 互动期：互动节点对每个首发帖评论（文案互不重复）
+    comment_text_by_node: dict[str, str] = {}
+    for owner_id, ref, action_id, _score in launch_posts:
+        for c_index, node in enumerate(interact_nodes, start=1):
+            text, score = ammo()[0]
+            text = text_or_fallback(text, node, c_index)
+            comment_text_by_node.setdefault(node.user_id, text)
+            emit(
+                node,
+                ACTION_COMMENT,
+                "stage_2_engage",
+                trigger="首发帖发布后跟进评论",
+                target=_post_target(ref, owner_id, f"数字人 {owner_id} 的首发帖"),
+                depends_on=[action_id],
+                creates={"comment_ref": f"C{len(actions_by_node[node.user_id]):03d}"},
+                payload={"评论内容": text, "弹药语义分": round(score, 4)},
+            )
+
+    # ③ 扩散期：扩散节点转发（一次扩散），优先转发语义分最高的首发帖
+    ranked_launch = sorted(launch_posts, key=lambda item: item[3], reverse=True)
+    repost1: list[tuple[str, str, str]] = []
+    for index, node in enumerate(amplify_nodes, start=1):
+        if not ranked_launch:
+            break
+        owner_id, src_ref, src_action, _score = ranked_launch[(index - 1) % len(ranked_launch)]
+        text, score = ammo()[0]
+        ref = f"R{index:03d}"
+        action = emit(
+            node,
+            ACTION_REPOST,
+            "stage_3_amplify",
+            trigger="进入扩散期后执行第一次扩散",
+            target=_post_target(src_ref, owner_id, f"数字人 {owner_id} 的首发帖"),
+            depends_on=[src_action],
+            creates={"post_ref": ref, "post_type": "repost"},
+            payload={
+                "转发文案": text,
+                "原文post_ref": src_ref,
+                "文案留空": not text,
+                "弹药语义分": round(score, 4),
+            },
+        )
+        post_refs.setdefault(node.user_id, ref)
+        repost1.append((node.user_id, ref, action["动作编号"]))
+
+    # ③ 扩散期：其余节点对一次扩散的转发点赞
+    for owner_id, ref, action_id in repost1:
+        for node in launch_nodes + interact_nodes + support_nodes:
+            if _should_skip_like(node.user_id, ref, node.risk_level):
+                continue
+            emit(
+                node,
+                ACTION_LIKE,
+                "stage_3_amplify",
+                trigger="一次扩散转发出现后执行",
+                target=_post_target(ref, owner_id, f"数字人 {owner_id} 的转发帖"),
+                depends_on=[action_id],
+                creates={},
+                payload={"跳过原因": ""},
+            )
+
+    # ③ 二次扩散：支持节点转发最相关的一次扩散结果
+    repost2: list[tuple[str, str, str]] = []
+    for index, node in enumerate(support_nodes, start=1):
+        if not repost1:
+            break
+        owner_id, src_ref, src_action = repost1[(index - 1) % len(repost1)]
+        ref = f"S{index:03d}"
+        action = emit(
+            node,
+            ACTION_REPOST,
+            "stage_3_amplify",
+            trigger="扩散期内完成第二次扩散",
+            target=_post_target(src_ref, owner_id, f"数字人 {owner_id} 的转发帖"),
+            depends_on=[src_action],
+            creates={"post_ref": ref, "post_type": "repost"},
+            payload={"转发文案": "", "原文post_ref": src_ref, "文案留空": True},
+        )
+        post_refs.setdefault(node.user_id, ref)
+        repost2.append((node.user_id, ref, action["动作编号"]))
+
+    # ③ 二次扩散后：首发 / 互动 / 扩散节点点赞
+    for owner_id, ref, action_id in repost2:
+        for node in launch_nodes + interact_nodes + amplify_nodes:
+            if _should_skip_like(node.user_id, ref, node.risk_level):
+                continue
+            emit(
+                node,
+                ACTION_LIKE,
+                "stage_3_amplify",
+                trigger="二次扩散转发出现后执行",
+                target=_post_target(ref, owner_id, f"数字人 {owner_id} 的转发帖"),
+                depends_on=[action_id],
+                creates={},
+                payload={"跳过原因": ""},
+            )
+
+    # ④ 支持期：互动节点以评论内容发帖，扩散 / 支持节点取弹药发帖
+    support_publishers = (
+        [(node, comment_text_by_node.get(node.user_id, "")) for node in interact_nodes]
+        + [(node, ammo()[0][0]) for node in amplify_nodes]
+        + [(node, ammo()[0][0]) for node in support_nodes]
+    )
+    for index, (node, text) in enumerate(support_publishers, start=1):
+        text = text_or_fallback(text, node, index)
+        ref = f"Q{index:03d}"
+        action = emit(
+            node,
+            ACTION_PUBLISH,
+            "stage_2_support",
+            trigger="进入支持期后发布承接帖",
+            target=_post_target(ref, node.user_id, "本节点支持期发帖"),
+            depends_on=[],
+            creates={"post_ref": ref, "post_type": "support_post"},
+            payload={"正文草案": text, "来源": "互动评论" if node in interact_nodes else "弹药库"},
+        )
+        post_refs.setdefault(node.user_id, ref)
+        publish_action_ids.setdefault(node.user_id, action["动作编号"])
+
+    node_outputs: dict[str, dict[str, Any]] = {}
+    for index, node in enumerate(selected_nodes, start=1):
+        actions = actions_by_node[node.user_id]
+        own_ref = post_refs.get(node.user_id, "")
+        node_outputs[f"id{node.user_id}"] = {
+            "时间阶段": STAGE_LABELS.get(node.dispatch_stage, node.dispatch_stage),
+            "发帖平台": platform,
+            "发帖内容": next(
+                (
+                    action["执行参数"].get("正文草案") or action["执行参数"].get("转发文案", "")
+                    for action in actions
+                    if action["动作类型"] == "publish_post"
+                ),
+                "",
+            ),
+            "动作清单": actions,
+            "动作统计": _count_actions(actions),
+            "执行约束": {
+                "节点角色": node.selected_role,
+                "执行阶段": node.dispatch_stage,
+                "执行优先级": node.dispatch_priority,
+                "节点得分": round(node.final_score, 6),
+                "风险等级": node.risk_level,
+                "人工复核": node.manual_review_required,
+                "风险标签": node.risk_flags,
+            },
+            "post_ref": own_ref,
+        }
+    return node_outputs, post_refs, publish_action_ids
+
+
+#: 四个时期的先后顺序——后端与前端都按这个顺序排，不用各自猜。
+STAGE_ORDER = ("stage_1_launch", "stage_2_engage", "stage_3_amplify", "stage_2_support")
+
+
+def _stage_windows(time_plan: dict[str, Any]) -> list[dict[str, str]]:
+    """把 ``time_plan``（英文 key）翻成「时期 + 窗口」的中文列表。
+
+    返回顺序就是执行先后顺序，前端按顺序渲染即可，不必再自己排序或翻译。
+    原样保留 ``传播窗口`` 那份机读字典，这里只补一份给人看的对照表。
+    """
+
+    windows: list[dict[str, str]] = []
+    for stage in STAGE_ORDER:
+        window = time_plan.get(stage)
+        if window:
+            windows.append({"时期": STAGE_LABELS.get(stage, stage), "窗口": str(window)})
+    # 兜底：time_plan 里若出现四个时期之外的 key，也列出来，避免静默丢信息。
+    for stage, window in time_plan.items():
+        if stage in STAGE_ORDER or not window:
+            continue
+        windows.append({"时期": STAGE_LABELS.get(stage, str(stage)), "窗口": str(window)})
+    return windows
+
+
+def _stage_statistics(
+    all_actions: list[dict[str, Any]],
+    time_plan: dict[str, Any],
+    node_number: dict[str, str],
+) -> list[dict[str, Any]]:
+    """每个时期的统计：参与数字人、动作数、发帖/评论/点赞/转发分布。
+
+    数据来自已经编排好的全量动作（``all_actions``），``动作分组`` 是时期中文名、
+    ``执行主体`` 是数字人 id、``动作类型`` 是英文枚举。前端按这份结构直接渲染，
+    不必再自己统计或翻译。
+    """
+
+    stats: list[dict[str, Any]] = []
+    for stage in STAGE_ORDER:
+        label = STAGE_LABELS.get(stage, stage)
+        stage_actions = [a for a in all_actions if a.get("动作分组") == label]
+        actors = sorted(
+            {
+                node_number.get(a.get("执行主体", ""), a.get("执行主体", ""))
+                for a in stage_actions
+            }
+        )
+        counts = {"发帖": 0, "评论": 0, "点赞": 0, "转发": 0}
+        for action in stage_actions:
+            name = ACTION_TYPE_LABELS_FALLBACK.get(action.get("动作类型", ""))
+            if name:
+                counts[name] += 1
+        stats.append(
+            {
+                "时期": label,
+                "窗口": str(time_plan.get(stage, "")),
+                "参与数字人": "、".join(actors) or "—",
+                "动作数": len(stage_actions),
+                "发帖": counts["发帖"],
+                "评论": counts["评论"],
+                "点赞": counts["点赞"],
+                "转发": counts["转发"],
+            }
+        )
+    return stats
+
+
 def _build_five_dimension_strategy(
     *,
     strategy_result: StrategyResult,
@@ -1418,7 +2033,14 @@ def _build_five_dimension_strategy(
     node_outputs: dict[str, dict[str, Any]],
     platform_item_fields: dict[str, dict[str, Any]] | None = None,
     platform_extra: dict[str, Any] | None = None,
+    max_actions_per_node: int | None = 3,
 ) -> dict[str, Any]:
+    """``max_actions_per_node`` 为 None 时保留该节点的全部动作。
+
+    多人协同按时期编排后，单人的点赞/评论动辄十几条，截断到 3 条会把
+    传播链砍没；跨平台分发仍用默认值，保持原行为不变。
+    """
+
     target_objects = strategy_result.strategy.target_object or ["泛公众"]
     frequency_plan = strategy_result.strategy.frequency_plan
 
@@ -1444,6 +2066,33 @@ def _build_five_dimension_strategy(
     content_items: list[dict[str, Any]] = []
     actions: list[dict[str, Any]] = []
 
+    # 给每个数字人分配统一编号（按角色顺序 + id 升序），所有维度共用，
+    # 避免各表用各的 id、看不出谁是谁。
+    numbered_nodes = sorted(
+        selected_nodes,
+        key=lambda n: (ROLE_ORDER.get(n.selected_role, 9), str(n.user_id)),
+    )
+    node_number = {node.user_id: f"D{i + 1:02d}" for i, node in enumerate(numbered_nodes)}
+    node_role_label = {
+        node.user_id: ROLE_LABELS.get(node.selected_role, node.selected_role)
+        for node in selected_nodes
+    }
+    # 全量动作索引（含完整字段），用于把「依赖动作」解析成可读的指向对象。
+    all_actions: list[dict[str, Any]] = []
+    for node_output in node_outputs.values():
+        all_actions.extend(node_output.get("动作清单", []) or [])
+    action_index = {a.get("动作编号"): a for a in all_actions}
+
+    # 活动窗口小时数：用于把动作数量换算成"条/小时"。优先取事件约束里的窗口，
+    # 取不到再退回默认的 24 小时，保证除零安全。
+    window_hours = 24
+    _evt = getattr(strategy_result, "event", None)
+    _cons = getattr(_evt, "constraints", None) if _evt is not None else None
+    if _cons is not None:
+        _wh = getattr(_cons, "campaign_window_hours", None)
+        if _wh:
+            window_hours = int(_wh)
+
     for node in selected_nodes:
         node_key = f"id{node.user_id}"
         node_output = node_outputs.get(node_key, {})
@@ -1453,29 +2102,63 @@ def _build_five_dimension_strategy(
         # 三组。``digital_human_coordination`` 是数字人之间的真正协同（点赞/评论/转发
         # 其他人的帖子），原先 ``max_actions=2`` 把它和 ``comment_monitoring`` 一起
         # 砍掉了，导致整张动作清单看起来都是"自发自评"。
-        selected_actions = _minimal_actions_for_node(node_actions, max_actions=3)
+        selected_actions = _minimal_actions_for_node(
+            node_actions,
+            max_actions=max_actions_per_node,
+            action_index=action_index,
+            node_number=node_number,
+            node_role_label=node_role_label,
+        )
 
         target_plan.append(
             {
+                "数字人编号": node_number[node.user_id],
                 "数字人id": node.user_id,
+                "角色": node_role_label[node.user_id],
+                "职责说明": ROLE_RESPONSIBILITY.get(node.selected_role, ""),
+                "人设": _persona_for_node(node=node, topic_labels=[]),
+                "平台": node.platform or platform,
                 "节点角色": node.selected_role,
                 "目标受众": target_objects,
             }
         )
         time_plan.append(
             {
+                "数字人编号": node_number[node.user_id],
                 "数字人id": node.user_id,
                 "时间阶段": node_output.get("时间阶段", _stage_text(node)),
             }
         )
-        frequency_items.append(
-            {
-                "数字人id": node.user_id,
-                "发帖频率": node_output.get("发帖频率", _frequency_text(node.frequency_per_day)),
-                "频率上限": _frequency_text(frequency_plan.global_cap_per_day),
-            }
-        )
+        action_stats = node_output.get("动作统计")
+        if action_stats:
+            # 多人协同：频率不再是预置上限，而是动作编排完成后的实际统计。
+            total_actions = int(action_stats.get("合计", 0) or 0)
+            per_hour = round(total_actions / window_hours, 3) if window_hours else 0
+            frequency_items.append(
+                {
+                    "数字人编号": node_number[node.user_id],
+                    "数字人id": node.user_id,
+                    "动作统计": action_stats,
+                    "条每小时": per_hour,
+                }
+            )
+        else:
+            # 单人模式：计划频率按"次/天"给出，换算成"条/小时"便于横向比较。
+            freq_per_day = node.frequency_per_day or 0
+            per_hour = round(freq_per_day / 24, 3)
+            frequency_items.append(
+                {
+                    "数字人编号": node_number[node.user_id],
+                    "数字人id": node.user_id,
+                    "发帖频率": node_output.get(
+                        "发帖频率", _frequency_text(node.frequency_per_day)
+                    ),
+                    "频率上限": _frequency_text(frequency_plan.global_cap_per_day),
+                    "条每小时": per_hour,
+                }
+            )
         platform_item: dict[str, Any] = {
+            "数字人编号": node_number[node.user_id],
             "数字人id": node.user_id,
             # 每个数字人只归属唯一模拟平台，优先输出其自身的平台归属。
             "分发平台": node.platform or platform,
@@ -1485,14 +2168,57 @@ def _build_five_dimension_strategy(
             # 多人分发不传该参数，因此不会凭空多出字段。
             platform_item.update(platform_item_fields.get(node.user_id, {}))
         platform_items.append(platform_item)
-        content_items.append(
-            {
-                "数字人id": node.user_id,
-                "post_ref": post_ref,
-                "发帖内容": node_output.get("发帖内容", ""),
-            }
-        )
+        # 内容维度：把该数字人「所有要发布的内容」都列出来——发帖 / 评论 / 转发
+        # 各占一行，配统一的内容编号（P/C/R/S/Q 系列）。转发允许无文案（标「为空」），
+        # 发帖 / 评论的文案由兜底逻辑保证非空，但万一为空也明确标「为空」。
+        node_content_actions = [
+            a
+            for a in all_actions
+            if a.get("执行主体") == node.user_id
+            and a.get("动作类型") in _CONTENT_ACTION_TYPES
+        ]
+        for action in node_content_actions:
+            _creates = action.get("生成对象", {}) or {}
+            _payload = action.get("执行参数", {}) or {}
+            content_id = _creates.get("post_ref") or _creates.get("comment_ref") or ""
+            content_text = (
+                _payload.get("正文草案")
+                or _payload.get("评论内容")
+                or _payload.get("转发文案")
+                or ""
+            )
+            content_text = (content_text or "").strip()
+            content_items.append(
+                {
+                    "数字人编号": node_number[node.user_id],
+                    "数字人id": node.user_id,
+                    "动作类型": ACTION_TYPE_LABELS.get(
+                        action.get("动作类型", ""), action.get("动作类型", "")
+                    ),
+                    "内容编号": content_id,
+                    "内容": content_text or "为空",
+                }
+            )
+        # 单节点模式的主帖可能只挂在节点 output 上、不在动作清单里，兜底补一行；
+        # 按文案去重，避免与动作清单里的发帖重复显示。
+        _main_post = (node_output.get("发帖内容") or "").strip()
+        if _main_post and not any(
+            c.get("内容") == _main_post for c in content_items
+        ):
+            content_items.append(
+                {
+                    "数字人编号": node_number[node.user_id],
+                    "数字人id": node.user_id,
+                    "动作类型": "发帖",
+                    "内容编号": post_ref or "—",
+                    "内容": _main_post,
+                }
+            )
         actions.extend(selected_actions)
+
+    # 动作清单按编排顺序输出（首发期 → 互动期 → 扩散期 → 支持期）。
+    # 原先是逐个节点拼接的，同一节点的动作聚成一堆，读不出传播推进。
+    actions.sort(key=lambda item: item.get("序号", 0) or 0)
 
     platform_dimension: dict[str, Any] = {
         "平台模式": platform_mode,
@@ -1511,6 +2237,8 @@ def _build_five_dimension_strategy(
         },
         "时间": {
             "传播窗口": strategy_result.strategy.time_plan,
+            "时期窗口": _stage_windows(strategy_result.strategy.time_plan),
+            "阶段统计": _stage_statistics(all_actions, strategy_result.strategy.time_plan, node_number),
             "数字人时间安排": time_plan,
         },
         "频率": {
@@ -1527,8 +2255,13 @@ def _build_five_dimension_strategy(
 def _minimal_actions_for_node(
     actions: list[dict[str, Any]],
     *,
-    max_actions: int,
+    max_actions: int | None,
+    action_index: dict[str, Any] | None = None,
+    node_number: dict[str, str] | None = None,
+    node_role_label: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
+    """``max_actions`` 为 None 时保留全部动作（多人协同的时期编排需要）。"""
+
     preferred_groups = ("content_publish", "audience_interaction", "digital_human_coordination")
     selected: list[dict[str, Any]] = []
     used_ids: set[str] = set()
@@ -1538,36 +2271,88 @@ def _minimal_actions_for_node(
             action_id = str(action.get("动作编号", ""))
             if action_id in used_ids or action.get("动作分组") != group:
                 continue
-            selected.append(_minimal_action(action))
+            selected.append(
+                _minimal_action(
+                    action,
+                    action_index=action_index,
+                    node_number=node_number,
+                    node_role_label=node_role_label,
+                )
+            )
             used_ids.add(action_id)
             break
-        if len(selected) >= max_actions:
+        if max_actions is not None and len(selected) >= max_actions:
             return selected
 
     for action in actions:
         action_id = str(action.get("动作编号", ""))
         if action_id in used_ids:
             continue
-        selected.append(_minimal_action(action))
+        selected.append(
+            _minimal_action(
+                action,
+                action_index=action_index,
+                node_number=node_number,
+                node_role_label=node_role_label,
+            )
+        )
         used_ids.add(action_id)
-        if len(selected) >= max_actions:
+        if max_actions is not None and len(selected) >= max_actions:
             break
     return selected
 
 
-def _minimal_action(action: dict[str, Any]) -> dict[str, Any]:
-    target = action.get("目标定位", {})
+def _minimal_action(
+    action: dict[str, Any],
+    *,
+    action_index: dict[str, Any] | None = None,
+    node_number: dict[str, str] | None = None,
+    node_role_label: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    actor = action.get("执行主体", "")
+    creates = action.get("生成对象", {}) or {}
+    # 内容编号 = 本动作生成的内容 id：发帖/转发用 post_ref，评论用 comment_ref。
+    content_id = creates.get("post_ref") or creates.get("comment_ref") or ""
     result = {
         "动作编号": action.get("动作编号", ""),
-        "执行主体": action.get("执行主体", ""),
-        "动作类型": action.get("动作类型", ""),
-        "执行平台": action.get("执行平台", ""),
-        "目标帖子": target.get("post_ref", ""),
+        # 序号 = 编排时的生成顺序，前端据此把动作清单按时间铺开。
+        "序号": action.get("序号", 0),
+        # 多人模式是时期名（首发期 / 互动期 / 扩散期 / 支持期），跨平台模式是
+        # 动作组；两种模式都用它给动作清单分组，否则看不出传播推进。
+        "动作分组": action.get("动作分组", ""),
+        # 数字人统一用 D01 / D02 …… 编号，和「数字人分工」里的编号一致。
+        "数字人": (node_number or {}).get(actor, actor) if node_number else actor,
+        # 动作类型中文名（发帖 / 评论 / 点赞 / 转发）。
+        "动作类型": ACTION_TYPE_LABELS.get(
+            action.get("动作类型", ""), action.get("动作类型", "")
+        ),
+        # 本动作生成的内容编号（P/C/R/S/Q 系列）；点赞等无内容则为空。
+        "内容编号": content_id,
     }
-    depends_on = action.get("依赖动作", [])
+    depends_on = action.get("依赖动作", []) or []
     if depends_on:
-        result["依赖动作"] = depends_on
+        # 依赖动作编号：本次动作所依赖的前置动作。
+        result["依赖动作编号"] = "、".join(str(d) for d in depends_on)
+        # 依赖帖子编号：前置动作所针对的帖子内容编号（即「被依赖的帖子」）。
+        dep_refs: list[str] = []
+        if action_index is not None:
+            for dep_id in depends_on:
+                dep = action_index.get(dep_id)
+                if not dep:
+                    continue
+                dep_ref = (
+                    (dep.get("目标定位", {}) or {}).get("post_ref")
+                    or (dep.get("生成对象", {}) or {}).get("post_ref")
+                    or ""
+                )
+                if dep_ref:
+                    dep_refs.append(str(dep_ref))
+        result["依赖帖子编号"] = "、".join(dep_refs) if dep_refs else "—"
+    else:
+        result["依赖动作编号"] = ""
+        result["依赖帖子编号"] = ""
     return result
+
 
 def _topic_labels(node: StrategyNodePlan, strategy_result: StrategyResult) -> list[str]:
     labels: list[str] = []

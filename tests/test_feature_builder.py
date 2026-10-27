@@ -57,8 +57,8 @@ class FeatureBuilderTest(unittest.TestCase):
                     "user_name": "user_1",
                     "user_followers": 1000,
                     "user_friends": 50,
-                    "user_interests": ["亲子阅读", "英语启蒙"],
-                    "user_description": "专注亲子阅读和英语启蒙",
+                    "user_interests": ["人工智能", "数据安全"],
+                    "user_description": "专注人工智能和数据安全监管",
                 },
                 "2": {
                     "user_id": 2,
@@ -157,7 +157,7 @@ class FeatureBuilderTest(unittest.TestCase):
             )
 
             loader = DataLoader(root)
-            event = RuleBasedEventParser().parse("围绕亲子阅读和英语启蒙做一次传播活动，提升讨论度。")
+            event = RuleBasedEventParser().parse("围绕人工智能治理和数据安全监管做一次传播活动，提升讨论度。")
             builder = FeatureBuilder()
             result = builder.build_features(
                 product_context=loader.load_product_context(),
@@ -235,8 +235,8 @@ class FeatureBuilderTest(unittest.TestCase):
                     "user_name": "node_2",
                     "user_followers": 180,
                     "user_friends": 60,
-                    "user_interests": ["亲子阅读", "英语启蒙"],
-                    "user_description": "focused on parent child reading",
+                    "user_interests": ["人工智能", "数据安全"],
+                    "user_description": "focused on ai governance and data security",
                 },
             }
             enriched_profiles = {
@@ -276,7 +276,7 @@ class FeatureBuilderTest(unittest.TestCase):
             )
 
             event = RuleBasedEventParser().parse(
-                "围绕亲子阅读和英语启蒙做一次传播活动，提升讨论度。",
+                "围绕人工智能治理和数据安全监管做一次传播活动，提升讨论度。",
                 use_llm=True,
                 llm_client=None,
             )
@@ -545,7 +545,7 @@ class FeatureBuilderLLMLoggingTest(unittest.TestCase):
 
     def _run_build(self, root: Path, builder: FeatureBuilder, client) -> object:
         event = RuleBasedEventParser().parse(
-            "围绕亲子阅读和英语启蒙做一次传播活动，提升讨论度。"
+            "围绕人工智能治理和数据安全监管做一次传播活动，提升讨论度。"
         )
         return builder.build_features(
             product_context=DataLoader(root).load_product_context(),

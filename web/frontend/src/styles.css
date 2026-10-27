@@ -574,6 +574,341 @@ h3 {
   gap: 10px;
 }
 
+/* 时间维度：四个时期窗口，一条横向时间轴 */
+.stage-windows {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.stage-window {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #d8e0e7;
+  border-radius: 8px;
+  padding: 8px 12px;
+  background: #f8fafc;
+  min-width: 180px;
+  flex: 1 1 180px;
+}
+.stage-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #10212f;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  flex: 0 0 auto;
+}
+.stage-body {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.35;
+}
+.stage-name {
+  font-weight: 650;
+  color: #10212f;
+}
+.stage-range {
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 12px;
+  color: #617080;
+}
+
+/* 频率可视化：每个数字人一行，四类动作条形对比 */
+.freq-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.freq-row {
+  display: grid;
+  grid-template-columns: 96px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #e5ebf0;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.freq-id {
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 13px;
+  color: #0f5f59;
+  background: #edf9f6;
+  border: 1px solid #cfe4dd;
+  border-radius: 6px;
+  padding: 2px 6px;
+  text-align: center;
+}
+.freq-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.freq-bar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 18px;
+  background: #f1f5f8;
+  border-radius: 5px;
+  overflow: hidden;
+}
+.freq-bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 5px;
+  opacity: 0.85;
+}
+.freq-发帖 { background: #2f6fed; }
+.freq-评论 { background: #f59e0b; }
+.freq-点赞 { background: #22a06b; }
+.freq-转发 { background: #9b59d0; }
+.freq-bar-label {
+  position: relative;
+  z-index: 1;
+  padding-left: 8px;
+  font-size: 12px;
+  color: #10212f;
+  font-weight: 600;
+}
+.freq-total {
+  font-size: 13px;
+  color: #364a5b;
+  white-space: nowrap;
+}
+
+/* 动作清单按阶段分组 */
+.action-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.action-group-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.action-stage {
+  font-weight: 700;
+  color: #10212f;
+  border-left: 4px solid #2f6fed;
+  padding-left: 8px;
+}
+.action-count {
+  font-size: 12px;
+  color: #617080;
+}
+
+/* 频率（精简版）：编号 + 条/小时，去掉原有条形图 */
+.freq-compact {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.freq-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+.freq-no {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+  height: 22px;
+  border-radius: 6px;
+  background: #2f6fed;
+  color: #fff;
+  font-weight: 700;
+  font-size: 12px;
+}
+.freq-rate {
+  font-weight: 700;
+  color: #10212f;
+}
+.freq-detail {
+  color: #8a97a3;
+  font-size: 12px;
+}
+
+/* 运行耗时旁「!」展开模块耗时 */
+.info-toggle {
+  margin-left: 6px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid #2f6fed;
+  background: #fff;
+  color: #2f6fed;
+  font-weight: 700;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+.info-toggle:hover {
+  background: #2f6fed;
+  color: #fff;
+}
+.module-times {
+  margin-top: 8px;
+  border: 1px solid #d8e0e7;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #f8fafc;
+}
+.module-times-head {
+  font-size: 12px;
+  color: #617080;
+  margin-bottom: 4px;
+}
+.module-time-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  padding: 2px 0;
+}
+.module-name {
+  color: #364a5b;
+}
+.module-val {
+  font-family: Consolas, "SFMono-Regular", monospace;
+  color: #10212f;
+  font-weight: 600;
+}
+
+/* 数字人职责卡片 */
+.role-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+}
+.role-card {
+  border: 1px solid #d8e0e7;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #f8fafc;
+}
+.role-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.role-no {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+  height: 22px;
+  border-radius: 6px;
+  background: #2f6fed;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+}
+.role-name {
+  font-weight: 700;
+  color: #10212f;
+}
+.role-platform {
+  margin-left: auto;
+  font-size: 12px;
+  color: #0f5f59;
+  background: #edf9f6;
+  border: 1px solid #cfe4dd;
+  border-radius: 6px;
+  padding: 1px 6px;
+}
+.role-duty {
+  font-size: 13px;
+  color: #364a5b;
+  line-height: 1.45;
+}
+.role-persona {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #617080;
+}
+.role-id {
+  margin-top: 6px;
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 11px;
+  color: #8a97a3;
+}
+
+/* 各阶段统计 */
+.stage-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.stage-stat {
+  border: 1px solid #d8e0e7;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #fff;
+}
+.stage-stat-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.stage-stat-head .stage-index {
+  background: #10212f;
+  color: #fff;
+}
+.stage-stat-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  font-size: 12px;
+  color: #364a5b;
+}
+.stage-stat-body span.stat-发帖 { color: #2f6fed; font-weight: 600; }
+.stage-stat-body span.stat-评论 { color: #f59e0b; font-weight: 600; }
+.stage-stat-body span.stat-点赞 { color: #22a06b; font-weight: 600; }
+.stage-stat-body span.stat-转发 { color: #9b59d0; font-weight: 600; }
+
+/* 动作清单（按阶段分组）表格：固定六列 */
+.action-table {
+  border: 1px solid #e5ebf0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.action-row {
+  display: grid;
+  grid-template-columns: 0.9fr 0.8fr 0.9fr 1.1fr 1.1fr 1fr;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  border-bottom: 1px solid #eef2f6;
+}
+.action-row:last-child {
+  border-bottom: none;
+}
+.action-row-head {
+  background: #f3f6fa;
+  font-weight: 700;
+  color: #364a5b;
+}
+.action-row span {
+  font-family: Consolas, "SFMono-Regular", monospace;
+  color: #10212f;
+  word-break: break-all;
+}
+
 .table-wrap {
   width: 100%;
   overflow: auto;

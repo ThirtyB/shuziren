@@ -194,16 +194,19 @@ class EvalHotEventsTest(unittest.TestCase):
             self.assertEqual(len(platform_items), len(selected_ids))
             for item in platform_items:
                 self.assertTrue(item["分发平台"].endswith("_simulated"), item)
-            self.assertEqual(
-                len(five_dimension_strategy["内容"]["数字人发帖内容"]),
-                len(selected_ids),
-            )
+            content_items = five_dimension_strategy["内容"]["数字人发帖内容"]
+            self.assertTrue(content_items)
+            # 内容按「动作」展开（发帖 / 评论 / 转发各一行），每个数字人至少有一条内容。
+            covered_ids = {item["数字人id"] for item in content_items}
+            self.assertTrue(set(selected_ids).issubset(covered_ids))
             self.assertTrue(five_dimension_strategy["内容"]["动作清单"])
             first_action = five_dimension_strategy["内容"]["动作清单"][0]
             self.assertIn("动作编号", first_action)
-            self.assertIn("执行主体", first_action)
+            self.assertIn("数字人", first_action)
             self.assertIn("动作类型", first_action)
-            self.assertIn("目标帖子", first_action)
+            self.assertIn("依赖动作编号", first_action)
+            self.assertIn("依赖帖子编号", first_action)
+            self.assertIn("内容编号", first_action)
             self.assertNotIn("目标定位", first_action)
             self.assertNotIn("执行参数", first_action)
 
@@ -314,7 +317,7 @@ class EvalHotEventsTest(unittest.TestCase):
             self.assertEqual(diagnostic["fallback_reason"], "llm_disabled")
 
             # 离线兜底：帖子正文是自然叙述，不是标签模板
-            first_post = content_dimension["数字人发帖内容"][0]["发帖内容"]
+            first_post = content_dimension["数字人发帖内容"][0]["内容"]
             self.assertIn("AI chip supply variant", first_post)
             for label in ("传播目标", "内容风格", "执行动作", "参考叙述变体"):
                 self.assertNotIn(label, first_post)
@@ -369,12 +372,12 @@ class EvalHotEventsTest(unittest.TestCase):
 
             self.assertTrue(output_path.exists())
             content_items = payload["五维调度策略"]["内容"]["数字人发帖内容"]
-            self.assertTrue(content_items[0]["发帖内容"].startswith("LLM generated post content"))
+            self.assertTrue(content_items[0]["内容"].startswith("LLM generated post content"))
             action_types = {
                 action["动作类型"]
                 for action in payload["五维调度策略"]["内容"]["动作清单"]
             }
-            self.assertTrue(action_types & {"reply_comment", "comment_post", "quote_repost", "like_post"})
+            self.assertTrue(action_types & {"评论", "点赞", "转发"})
 
     def test_llm_text_generation_includes_high_risk_image_nodes(self) -> None:
         node = StrategyNodePlan(

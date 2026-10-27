@@ -42,12 +42,108 @@ GENERIC_STOPWORDS = {
     "影响",
 }
 
+#: 事件类型判定词典（时事政治领域）。
+#:
+#: **维护注意**：``_keyword_score`` 的得分是 ``命中数 / 该类关键词总数``，
+#: 所以**单个类别的词不是越多越好**——分母随词数增长，堆成大杂烩反而更难胜出。
+#: 因此时政领域按事件库 118 个 domain 归并成 15 个细分类，每类控制在 14~18 词。
+#: 扩充时请沿用这个原则：宁可**新增细分类**，不要往一个类里无限堆词。
 EVENT_TYPE_RULES: dict[str, tuple[str, ...]] = {
-    "public_opinion_response": ("争议", "投诉", "质疑", "回应", "澄清", "危机", "辟谣", "负面"),
-    "activity_announcement": ("活动", "直播", "专场", "福利", "报名", "上线", "发布", "通知"),
-    "english_learning_engagement": ("英语", "英文", "启蒙", "分级阅读", "单词", "口语"),
-    "parent_child_reading": ("亲子", "家长", "阅读", "绘本", "家庭教育", "陪读"),
-    "reading_habit_campaign": ("阅读计划", "阅读打卡", "书单", "读书", "阅读习惯", "阅读推广"),
+    # military / defense_policy / defense_industry / security* / border_security /
+    # peacekeeping / peace_process / regional_security
+    "military_conflict": (
+        "军事", "军演", "导弹", "核武器", "核试验", "战争", "军事冲突", "停火",
+        "撤军", "维和", "边境", "领空", "领海", "战机", "航母", "无人机",
+        "空袭", "防务", "军费", "武装",
+    ),
+    # international_relations / international_law / regional_relations /
+    # global_governance / humanitarian_crisis / human_rights / rule_of_law
+    "international_relations": (
+        "外交", "双边", "多边", "峰会", "会谈", "出访", "访华", "建交",
+        "国际组织", "联合国", "安理会", "盟友", "伙伴", "协议", "签署",
+        "声明", "谴责", "召见", "大使", "地缘政治", "主权", "领土", "断交",
+    ),
+    # economic_growth / economic_crisis / economic_policy / inflation /
+    # monetary_policy / fiscal_policy / tax_policy / debt / household_debt / inflation
+    "macro_economy": (
+        "经济增长", "衰退", "滞胀", "通胀", "通缩", "物价", "利率", "降息",
+        "加息", "央行", "货币政策", "财政", "税收", "国债", "债务", "赤字",
+        "内需", "消费", "出口", "进口",
+    ),
+    # finance / financial_market / financial_risk / financial_regulation /
+    # banking_regulation / insurance / payments / real_estate / housing / international_finance
+    "financial_market": (
+        "股市", "债市", "银行", "信贷", "保险", "投资", "基金", "资本",
+        "上市", "破产", "房地产", "房价", "楼市", "理财", "证券", "股民",
+    ),
+    # artificial_intelligence / ai_governance / ai_policy / ai_risk / technology /
+    # space / space_policy / intellectual_property
+    "tech_ai": (
+        "人工智能", "大模型", "算法", "算力", "芯片", "半导体", "光刻机",
+        "开源", "自动驾驶", "机器人", "量子", "航天", "卫星", "火箭",
+        "空间站", "知识产权",
+    ),
+    # cybersecurity / cybersecurity_regulation / data_breach / data_governance /
+    # digital_governance / platform_governance / platform_regulation / antitrust / online_safety
+    "cyber_data_governance": (
+        "网络安全", "黑客", "泄露", "数据泄露", "漏洞", "勒索", "攻击",
+        "木马", "隐私", "个人信息", "数据", "合规", "监管", "平台",
+        "反垄断", "内容审核",
+    ),
+    # energy / energy_* / oil_market / critical_minerals / battery_regulation /
+    # hydrogen / utility_regulation / renewable_energy
+    "energy_resources": (
+        "能源", "原油", "油价", "天然气", "煤炭", "石油", "核电", "光伏",
+        "风电", "新能源", "储能", "电池", "稀土", "矿产", "电力", "电价",
+        "限电",
+    ),
+    # climate / climate_* / environment* / biodiversity / volcano / earthquake /
+    # wildfire / water_security / disaster_response
+    "climate_disaster": (
+        "气候", "变暖", "碳排放", "碳中和", "碳市场", "减排", "极端天气",
+        "高温", "暴雨", "洪涝", "台风", "干旱", "地震", "火山", "山火",
+        "海啸", "灾害", "应急",
+    ),
+    # public_health / healthcare / pharmaceuticals / healthcare_cybersecurity /
+    # environment_health
+    "public_health": (
+        "疫情", "传染病", "流感", "病毒", "疫苗", "接种", "核酸", "隔离",
+        "防控", "公共卫生", "医疗", "医保", "药品", "药价", "集采", "医院",
+    ),
+    # politics / election / election_dispute / election_integrity /
+    # political_crisis / european_politics
+    "politics_election": (
+        "选举", "大选", "投票", "选民", "民调", "候选人", "议会", "国会",
+        "参议院", "众议院", "政府", "内阁", "换届", "就职", "弹劾",
+        "罢免", "修宪", "公投", "政党", "执政", "法案", "立法", "预算",
+    ),
+    # social_unrest / security_crisis / political_crisis
+    "social_unrest": (
+        "抗议", "示威", "游行", "罢工", "罢课", "骚乱", "暴乱", "镇压",
+        "戒严", "动荡", "动乱", "政变", "暴动", "集会",
+    ),
+    # supply_chain / logistics / shipping / aviation_safety / industrial_policy /
+    # infrastructure / infrastructure_finance / transport_policy
+    "industry_supply_chain": (
+        "供应链", "物流", "航运", "港口", "货运", "集装箱", "航线", "空运",
+        "航空", "航班", "铁路", "高铁", "基建", "基础设施", "制造业",
+        "工厂", "产能", "订单", "产业链", "汽车",
+    ),
+    # agriculture_policy / food_market
+    "agriculture_food": (
+        "农业", "粮食", "农产品", "丰收", "减产", "耕地", "种业", "养殖",
+        "渔业", "粮价", "粮食安全", "农村", "农民", "食品",
+    ),
+    # labor_policy / migration_policy / demographics
+    "labor_demographics": (
+        "用工", "招工", "裁员", "失业", "劳工", "工会", "社保", "养老金",
+        "人口", "生育", "老龄化", "户籍", "移民", "难民",
+    ),
+    # public_policy / consumer_policy / corporate_governance / sports_policy
+    "social_livelihood": (
+        "教育", "学校", "学生", "教师", "考试", "高考", "学费", "住房",
+        "租房", "民生", "治安", "犯罪", "诈骗", "事故", "社区", "城市治理",
+    ),
 }
 
 GOAL_RULES: dict[str, tuple[str, ...]] = {
@@ -57,15 +153,32 @@ GOAL_RULES: dict[str, tuple[str, ...]] = {
     "conversion": ("报名", "转化", "参与报名", "下载", "注册"),
 }
 
+#: 目标人群判定词典（时事政治领域）。
+#: 注意 ``general_public`` 是 ``_event_match_keywords`` 里的 generic tag 会被过滤，
+#: 因此这里一律用带领域后缀的键名，避免受众标签在下游被整类丢掉。
 AUDIENCE_RULES: dict[str, tuple[str, ...]] = {
-    "parent_child": ("亲子", "家长", "育儿", "家庭教育"),
-    "reading_interest": ("阅读", "绘本", "书单", "读书"),
-    "english_learning": ("英语", "英文", "启蒙", "口语", "单词"),
-    "education_practitioner": ("老师", "教育", "学校", "课堂"),
+    "policy_observer": ("政策", "政务", "时政", "公共事务", "改革", "体制改革"),
+    "investor_finance": ("投资", "财经", "股市", "基金", "理财", "证券", "股民"),
+    "industry_professional": ("行业", "产业", "企业", "职场", "从业", "工商界"),
+    "international_audience": ("国际", "海外", "全球", "跨境", "外贸", "涉外"),
+    "tech_audience": ("科技", "数码", "互联网", "开发者", "程序员", "极客"),
+    "security_strategy": ("安全", "战略", "防务", "军事", "情报", "国际安全"),
+    "academic_expert": ("专家", "学者", "研究", "智库", "学术", "分析师"),
+    "livelihood_public": ("民生", "市民", "居民", "公众", "社区", "消费者"),
 }
 
-HIGH_RISK_KEYWORDS = ("危机", "投诉", "举报", "造假", "翻车", "维权", "道歉")
-MEDIUM_RISK_KEYWORDS = ("争议", "质疑", "刷屏", "负面", "误解", "冲突")
+#: 风险等级触发词。命中即抬高风险等级，进而收紧准入门槛、加大扣分系数、
+#: 压低发布频次。时政场景下的战争/制裁/骚乱等应判高风险，这是预期行为。
+HIGH_RISK_KEYWORDS = (
+    "危机", "投诉", "举报", "造假", "翻车", "维权", "道歉",
+    "战争", "袭击", "空袭", "制裁", "骚乱", "暴乱", "政变", "镇压",
+    "弹劾", "泄漏", "崩盘", "遇难", "伤亡", "封锁", "断交", "暴动",
+)
+MEDIUM_RISK_KEYWORDS = (
+    "争议", "质疑", "刷屏", "负面", "误解", "冲突", "罢工", "抗议",
+    "分歧", "摩擦", "波动", "裁员", "紧张", "对峙", "谴责", "警告",
+    "下滑", "亏损", "调查", "审查",
+)
 
 
 def _normalize_text(text: str) -> str:

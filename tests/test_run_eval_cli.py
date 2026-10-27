@@ -85,9 +85,9 @@ def _write_minimal_workspace(root: Path, *, node_count: int = 4) -> None:
             # 而事件关键词同样来自中文标题 —— 两者语言一致才可能命中。这里若沿用
             # 英文标签，关键词匹配必然为 0，所有节点都会被 semantic gate 判否，
             # "指定平台后选人受限于该平台"也就无从验证。
-            "user_interests": ["亲子共读", "英语启蒙", "阅读", "教育"],
+            "user_interests": ["人工智能", "数据安全", "算法治理", "科技"],
             "user_description": (
-                "专注亲子共读与英语启蒙，分享陪读经验和分级阅读书单。"
+                "专注人工智能治理与数据安全监管，分享算法合规与平台治理观察。"
             ),
             "platform": simulated_platforms[(index - 1) % len(simulated_platforms)],
         }
@@ -148,13 +148,13 @@ def _write_minimal_hot_event_input(root: Path) -> Path:
         json.dumps(
             {
                 "event_id": "hot_event_003",
-                "event_title": "亲子共读与英语启蒙话题讨论",
-                "event_summary": "围绕亲子共读和英语启蒙，引导家长分享陪读经验与分级阅读书单。",
-                "target": "扩大亲子阅读话题触达并引导理性讨论",
-                "domain": "reading",
+                "event_title": "人工智能治理与数据安全监管话题讨论",
+                "event_summary": "围绕人工智能治理和数据安全监管，引导从业者分享算法合规与平台治理经验。",
+                "target": "扩大人工智能治理话题触达并引导理性讨论",
+                "domain": "technology",
                 "opinion_variants": [
-                    "陪孩子读绘本时如何兼顾英语启蒙",
-                    "分级阅读书单应该怎么选",
+                    "大模型算法监管该如何落地",
+                    "数据安全合规边界应该怎么划",
                 ],
             },
             ensure_ascii=False,

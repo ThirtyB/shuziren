@@ -1,0 +1,14 @@
+{
+  "generated_at": "2026-10-27T18:23:30+08:00",
+  "content_generation": {
+    "requested": false,
+    "configured": false,
+    "attempted": false,
+    "used": false,
+    "provider": null,
+    "model": null,
+    "base_url": null,
+    "fallback_reason": "llm_disabled"
+  },
+  "post_content_source": "rule_fallback"
+}

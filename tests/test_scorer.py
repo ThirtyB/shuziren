@@ -32,8 +32,8 @@ class ScorerTest(unittest.TestCase):
                     "user_name": "user_1",
                     "user_followers": 1200,
                     "user_friends": 80,
-                    "user_interests": ["亲子阅读", "英语启蒙"],
-                    "user_description": "专注亲子阅读和英语启蒙",
+                    "user_interests": ["人工智能", "数据安全"],
+                    "user_description": "专注人工智能和数据安全监管",
                 },
                 "2": {
                     "user_id": 2,
@@ -119,7 +119,7 @@ class ScorerTest(unittest.TestCase):
 
             loader = DataLoader(root)
             event = RuleBasedEventParser().parse(
-                "围绕亲子阅读和英语启蒙做一次传播活动，提升讨论度并控制风险。"
+                "围绕人工智能治理和数据安全监管做一次传播活动，提升讨论度并控制风险。"
             )
             feature_result = FeatureBuilder().build_features(
                 product_context=loader.load_product_context(),

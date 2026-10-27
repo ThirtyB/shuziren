@@ -151,6 +151,9 @@ class RunStatus(BaseModel):
     trace_dir: str
     results: list[dict[str, Any]] = Field(default_factory=list)
     errors: list[dict[str, Any]] = Field(default_factory=list)
+    # 端到端耗时（秒）：从收到请求（``created_at``）到本次运行产出结果为止。
+    # 进行中为 None，只有在终态（completed / failed）时才写入。
+    elapsed_seconds: float | None = None
 
 
 def create_app() -> FastAPI:
@@ -708,16 +711,42 @@ def _submit_job(run_id: str, job: Any) -> None:
     _EXECUTOR.submit(_run_job_wrapper, run_id, job)
 
 
+def _elapsed_seconds(created_at: str | None) -> float | None:
+    """从 ``created_at``（收到请求那一刻）到现在经过的秒数。
+
+    解析失败时返回 None——耗时是展示信息，不该因为它把整个 run 判成失败。
+    """
+
+    if not created_at:
+        return None
+    try:
+        start = datetime.fromisoformat(str(created_at))
+    except ValueError:
+        return None
+    return round(max((datetime.now().astimezone() - start).total_seconds(), 0.0), 3)
+
+
 def _run_job_wrapper(run_id: str, job: Any) -> None:
+    created_at = _read_status(run_id).get("created_at")
     try:
         _update_status(run_id, state="running")
         job()
         status = _read_status(run_id)
         final_state = "failed" if status.get("completed", 0) == 0 and status.get("failed", 0) else "completed"
-        _update_status(run_id, state=final_state, current_event_id=None)
+        _update_status(
+            run_id,
+            state=final_state,
+            current_event_id=None,
+            elapsed_seconds=_elapsed_seconds(created_at),
+        )
     except Exception as exc:  # pragma: no cover - defensive boundary for background jobs
         _append_error(run_id, event_id=None, message=f"{type(exc).__name__}: {exc}")
-        _update_status(run_id, state="failed", current_event_id=None)
+        _update_status(
+            run_id,
+            state="failed",
+            current_event_id=None,
+            elapsed_seconds=_elapsed_seconds(created_at),
+        )
 
 
 def _run_image_job(*, run_id: str, image_path: Path, options: RunOptions) -> None:

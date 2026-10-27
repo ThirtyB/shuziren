@@ -65,7 +65,7 @@ export function MultiUserScenario(props: SharedScenarioProps) {
       </label>
 
       <div className="sub-section">
-        <h3>基础运行参数</h3>
+        <h3>小队人数与传播窗口</h3>
         <BaseOptionsForm
           maxSelectedNodes={props.maxSelectedNodes}
           setMaxSelectedNodes={props.setMaxSelectedNodes}
@@ -79,9 +79,11 @@ export function MultiUserScenario(props: SharedScenarioProps) {
           setProfileLimit={props.setProfileLimit}
           allowedPlatforms={props.allowedPlatforms}
           setAllowedPlatforms={props.setAllowedPlatforms}
-          // 多人协同：需要主选数量（小队人数），平台由 dispatchPlatform 决定。
+          // 多人协同：用户只需指定"平台 + 小队人数"。风险等级 / 传播窗口 /
+          // 频率上限 / Profile 限制保持默认值，不在本场景暴露。
           showMaxSelectedNodes={true}
           showAllowedPlatforms={false}
+          showAdvancedOptions={false}
         />
       </div>
 

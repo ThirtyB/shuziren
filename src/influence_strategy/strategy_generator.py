@@ -176,23 +176,27 @@ class StrategyGenerator:
 
     def _build_time_plan(self, campaign_window_hours: int) -> dict[str, str]:
         total_hours = max(int(campaign_window_hours), 1)
-        if total_hours == 1:
+
+        # 四个时期按 0.1 / 0.2 / 0.4 / 0.3 首尾相接铺满整个窗口：
+        #   首发 T0~0.1H → 互动 0.1H~0.3H → 扩散 0.3H~0.7H → 支持 0.7H~H
+        # 旧实现里 support 与 engage 共用同一时间窗（都是 launch_end~engage_end），
+        # 支持没有独立时段；这里拆成四段各自独立。
+        if total_hours < 4:
+            # 窗口太短，四段无法各占 1 小时，退化为顺序排开
             launch_end = 1
-            engage_end = 1
-        elif total_hours == 2:
-            launch_end = 1
-            engage_end = 2
+            engage_end = min(total_hours, 2)
+            amplify_end = min(total_hours, 3)
         else:
-            launch_end = max(1, min(total_hours - 1, round(total_hours * 0.10)))
-            engage_end = max(launch_end + 1, min(total_hours, round(total_hours * 0.35)))
-            if engage_end <= launch_end:
-                engage_end = min(total_hours, launch_end + 1)
+            # 每段至少 1 小时，同时给后面每段至少留 1 小时，保证严格递增不越界
+            launch_end = min(max(round(total_hours * 0.10), 1), total_hours - 3)
+            engage_end = min(max(round(total_hours * 0.30), launch_end + 1), total_hours - 2)
+            amplify_end = min(max(round(total_hours * 0.70), engage_end + 1), total_hours - 1)
 
         return {
             "stage_1_launch": f"T0 - T+{launch_end}h",
             "stage_2_engage": f"T+{launch_end}h - T+{engage_end}h",
-            "stage_2_support": f"T+{launch_end}h - T+{engage_end}h",
-            "stage_3_amplify": f"T+{engage_end}h - T+{total_hours}h",
+            "stage_3_amplify": f"T+{engage_end}h - T+{amplify_end}h",
+            "stage_2_support": f"T+{amplify_end}h - T+{total_hours}h",
         }
 
     def _build_frequency_plan(

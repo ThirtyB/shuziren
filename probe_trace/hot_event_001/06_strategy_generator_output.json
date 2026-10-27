@@ -1,0 +1,301 @@
+{
+  "generated_at": "2026-10-27T18:23:30+08:00",
+  "summary": {
+    "event_id": "hot_event_001",
+    "event_type": "industry_supply_chain",
+    "selected_count": 4,
+    "fallback_count": 0,
+    "primary_platform": "facebook",
+    "estimated_total_dispatches": 5,
+    "review_required": true,
+    "avg_selected_final_score": 0.29059,
+    "status": "manual_required",
+    "status_reason": "主选节点含需人工复核项"
+  },
+  "stage_plans": [
+    {
+      "stage_name": "stage_1_launch",
+      "stage_label": "启动期",
+      "time_window": "T0 - T+2h",
+      "objective": "建立首轮叙事锚点并完成首发触达。",
+      "node_count": 1,
+      "node_ids": [
+        "86816"
+      ],
+      "selected_roles": [
+        "core_publish_node"
+      ],
+      "content_focus": "首发主信息、核心观点和初始讨论锚点。",
+      "success_signal": "核心信息被稳定引用，首轮触达完成。"
+    },
+    {
+      "stage_name": "stage_2_engage",
+      "stage_label": "互动期",
+      "time_window": "T+2h - T+7h",
+      "objective": "承接评论与问答，提升讨论深度与反馈回收。",
+      "node_count": 1,
+      "node_ids": [
+        "222891"
+      ],
+      "selected_roles": [
+        "interaction_response_node"
+      ],
+      "content_focus": "回收互动反馈、引导追问并补充案例。",
+      "success_signal": "评论、问答或讨论深度明显提升。"
+    },
+    {
+      "stage_name": "stage_3_amplify",
+      "stage_label": "扩散期",
+      "time_window": "T+7h - T+17h",
+      "objective": "推动二次传播，扩展外圈覆盖范围。",
+      "node_count": 2,
+      "node_ids": [
+        "106201",
+        "111007"
+      ],
+      "selected_roles": [
+        "amplification_node"
+      ],
+      "content_focus": "提炼亮点并推动二次传播，扩大外圈触达。",
+      "success_signal": "二次扩散持续发生，外圈用户开始跟进。"
+    }
+  ],
+  "selected_nodes": [
+    {
+      "user_id": "86816",
+      "user_name": "user_86816",
+      "platform": "facebook_simulated",
+      "selection_rank": 1,
+      "selection_bucket": "primary",
+      "selected_role": "core_publish_node",
+      "dispatch_stage": "stage_1_launch",
+      "dispatch_priority": "p2",
+      "final_score": 0.374015,
+      "risk_level": "low",
+      "manual_review_required": false,
+      "follower_count": 154398,
+      "friend_count": 3666,
+      "neighbor_count": 2,
+      "mutual_neighbor_count": 0,
+      "received_interaction_count": 0,
+      "made_interaction_count": 9,
+      "influence_score": 0.444793,
+      "diffusion_score": 0.264644,
+      "topic_match_score": 0.0,
+      "stability_score": 1.0,
+      "llm_feature_score": 0.0,
+      "risk_flags": [
+        "topic_mismatch"
+      ],
+      "matched_keywords": [],
+      "semantic_tags": [],
+      "timing_window": "T0 - T+2h",
+      "frequency_per_day": 1,
+      "recommended_action": "发布首条核心内容，统一事件框架并设置讨论锚点。",
+      "suggested_content_style": "主信息发布型内容，先完成首轮触达和统一表达。",
+      "rationale": [
+        "stable_profile",
+        "role_hint=interaction_response",
+        "final_score=0.374",
+        "risk_flags=topic_mismatch",
+        "risk_level=low"
+      ]
+    },
+    {
+      "user_id": "106201",
+      "user_name": "user_106201",
+      "platform": "facebook_simulated",
+      "selection_rank": 2,
+      "selection_bucket": "primary",
+      "selected_role": "amplification_node",
+      "dispatch_stage": "stage_3_amplify",
+      "dispatch_priority": "p3",
+      "final_score": 0.295801,
+      "risk_level": "low",
+      "manual_review_required": false,
+      "follower_count": 2213,
+      "friend_count": 1002,
+      "neighbor_count": 2,
+      "mutual_neighbor_count": 1,
+      "received_interaction_count": 1,
+      "made_interaction_count": 3,
+      "influence_score": 0.365585,
+      "diffusion_score": 0.343987,
+      "topic_match_score": 0.0,
+      "stability_score": 0.9375,
+      "llm_feature_score": 0.0,
+      "risk_flags": [
+        "topic_mismatch"
+      ],
+      "matched_keywords": [],
+      "semantic_tags": [],
+      "timing_window": "T+7h - T+17h",
+      "frequency_per_day": 1,
+      "recommended_action": "转述核心信息并扩展到相邻圈层，完成二次扩散。",
+      "suggested_content_style": "摘要转述型内容，用于扩大外圈覆盖。",
+      "rationale": [
+        "stable_profile",
+        "role_hint=interaction_response",
+        "final_score=0.296",
+        "risk_flags=topic_mismatch",
+        "risk_level=low"
+      ]
+    },
+    {
+      "user_id": "111007",
+      "user_name": "user_111007",
+      "platform": "facebook_simulated",
+      "selection_rank": 3,
+      "selection_bucket": "primary",
+      "selected_role": "amplification_node",
+      "dispatch_stage": "stage_3_amplify",
+      "dispatch_priority": "p3",
+      "final_score": 0.180954,
+      "risk_level": "medium",
+      "manual_review_required": false,
+      "follower_count": 0,
+      "friend_count": 0,
+      "neighbor_count": 1,
+      "mutual_neighbor_count": 0,
+      "received_interaction_count": 0,
+      "made_interaction_count": 1,
+      "influence_score": 0.040536,
+      "diffusion_score": 0.279121,
+      "topic_match_score": 0.0,
+      "stability_score": 0.375,
+      "llm_feature_score": 0.0,
+      "risk_flags": [
+        "profile_sparse",
+        "topic_mismatch"
+      ],
+      "matched_keywords": [],
+      "semantic_tags": [],
+      "timing_window": "T+7h - T+17h",
+      "frequency_per_day": 1,
+      "recommended_action": "转述核心信息并扩展到相邻圈层，完成二次扩散。",
+      "suggested_content_style": "摘要转述型内容，用于扩大外圈覆盖。",
+      "rationale": [
+        "role_hint=general_support",
+        "final_score=0.181",
+        "risk_flags=profile_sparse,topic_mismatch",
+        "selected_role=amplification_node",
+        "risk_level=medium"
+      ]
+    },
+    {
+      "user_id": "222891",
+      "user_name": "user_222891",
+      "platform": "facebook_simulated",
+      "selection_rank": 4,
+      "selection_bucket": "primary",
+      "selected_role": "interaction_response_node",
+      "dispatch_stage": "stage_2_engage",
+      "dispatch_priority": "p3",
+      "final_score": 0.31159,
+      "risk_level": "low",
+      "manual_review_required": false,
+      "follower_count": 878,
+      "friend_count": 1798,
+      "neighbor_count": 1,
+      "mutual_neighbor_count": 0,
+      "received_interaction_count": 0,
+      "made_interaction_count": 2,
+      "influence_score": 0.256454,
+      "diffusion_score": 0.224325,
+      "topic_match_score": 0.0,
+      "stability_score": 0.875,
+      "llm_feature_score": 0.0,
+      "risk_flags": [
+        "topic_mismatch"
+      ],
+      "matched_keywords": [],
+      "semantic_tags": [],
+      "timing_window": "T+2h - T+7h",
+      "frequency_per_day": 2,
+      "recommended_action": "承接评论区问题，组织答疑、讨论与反馈回收。",
+      "suggested_content_style": "轻量互动跟进内容，用于承接问题和提升停留讨论。",
+      "rationale": [
+        "stable_profile",
+        "role_hint=general_support",
+        "final_score=0.312",
+        "risk_flags=topic_mismatch",
+        "risk_level=low"
+      ]
+    }
+  ],
+  "fallback_nodes": [],
+  "strategy": {
+    "target_object": [
+      "泛公众",
+      "industry_professional",
+      "international_audience",
+      "security_strategy",
+      "livelihood_public"
+    ],
+    "objective": "提示公众关注红海航运安全对全球物流、贸易成本和供应链稳定性的影响，并引导理性讨论风险外溢。",
+    "time_plan": {
+      "stage_1_launch": "T0 - T+2h",
+      "stage_2_engage": "T+2h - T+7h",
+      "stage_3_amplify": "T+7h - T+17h",
+      "stage_2_support": "T+17h - T+24h"
+    },
+    "frequency_plan": {
+      "global_cap_per_day": 3,
+      "core_publish_node_per_day": 1,
+      "interaction_response_node_per_day": 2,
+      "amplification_node_per_day": 1,
+      "support_node_per_day": 1,
+      "notes": [
+        "single_node_daily_cap<=3",
+        "avoid_identical_messages_in_short_window",
+        "high_risk_event_reduce_clustered_dispatch"
+      ]
+    },
+    "platform_plan": {
+      "primary_platform": "facebook",
+      "secondary_platforms": [],
+      "execution_mode": "single_platform_simulated",
+      "coordination_notes": [
+        "keep_core_message_consistent_across_nodes",
+        "dispatch_platform=facebook",
+        "current_baseline_focuses_on_single_platform_execution"
+      ]
+    },
+    "content_plan": {
+      "core_publish_node": "主信息发布型内容，先完成首轮触达和统一表达。",
+      "interaction_response_node": "轻量互动跟进内容，用于承接问题和提升停留讨论。",
+      "amplification_node": "摘要转述型内容，用于扩大外圈覆盖。",
+      "support_node": "辅助补充内容，用于增强信息完整度。",
+      "general_guardrails": [
+        "避免高频重复表达",
+        "避免同一时间窗口内节点内容完全同质化",
+        "确保核心事实和口径一致",
+        "避免使用情绪化、对立化或未经证实的表述",
+        "放大节点仅做事实摘要，不追加推测性扩写"
+      ]
+    },
+    "risk_control": {
+      "risk_level": "high",
+      "review_required": true,
+      "manual_review_node_ids": [],
+      "fallback_trigger": [
+        "stage_1_launch 未按计划执行时，启用前 1-2 个 fallback 节点补位",
+        "评论区出现明显负向升级时，暂停 amplification 节点并回到 interaction_response 节点"
+      ],
+      "notes": [
+        "事件风险等级=high",
+        "避免同一批节点在短时间内重复触发相同内容",
+        "优先观察 stage_1_launch 的首轮反馈，再决定是否扩大扩散范围",
+        "高风险事件建议先以核心发布与互动回应为主，放大节点从严控制"
+      ]
+    },
+    "explainability": [
+      "本次策略为事件 hot_event_001 选出 4 个主选节点和 0 个备选节点。",
+      "角色分布为 core_publish_node=1, amplification_node=2, interaction_response_node=1，用于覆盖首发、互动承接和二次扩散三个环节。",
+      "主平台为 facebook，传播窗口为 24 小时。",
+      "目标圈层聚焦于 泛公众, industry_professional, international_audience, security_strategy, livelihood_public。",
+      "当前事件风险等级为 high，人工复核需求=true。",
+      "主选节点的平均 final_score=0.291。"
+    ]
+  }
+}

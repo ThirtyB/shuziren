@@ -49,6 +49,45 @@ DEFAULT_SELECTED_ROLE = "support_node"
 DEFAULT_ROLE_HINT = "general_support"
 DEFAULT_DISPATCH_STAGE = "stage_2_support"
 
+# --------------------------------------------------------------------------- #
+# 多人协同（单平台）身份配额
+# --------------------------------------------------------------------------- #
+#: 身份人数占比。支持不设占比——它拿走分配完前三类之后的剩余名额。
+ROLE_QUOTA_RATIO: dict[str, float] = {
+    "core_publish_node": 0.20,
+    "amplification_node": 0.40,
+    "interaction_response_node": 0.20,
+}
+
+#: 人数下限。首发与扩散至少 1 人（总人数 >= 2 时必定满足）；
+#: 互动与支持允许为 0。
+ROLE_MIN_COUNT: dict[str, int] = {
+    "core_publish_node": 1,
+    "amplification_node": 1,
+    "interaction_response_node": 0,
+    "support_node": 0,
+}
+
+#: 身份分配顺序：先定首发，再从**剩下的人**里定扩散，然后互动，最后剩余归支持。
+#: 注意这与执行时期顺序（首发 → 互动 → 扩散 → 支持）不同：选人按重要性，执行按时间。
+ROLE_ASSIGN_ORDER: tuple[str, ...] = (
+    "core_publish_node",
+    "amplification_node",
+    "interaction_response_node",
+    "support_node",
+)
+
+#: 首发挑选的"影响力 / 话题匹配度"门槛。
+#:
+#: 实测候选池分布（facebook 平台、189 个 eligible 节点）：
+#:   influence_score   p25=0.33  p50=0.40  p75=0.52
+#:   topic_match_score p50=0.18  max=0.36
+#: topic_match_score 是「命中词数 / 关键词总数」，命中 2 个词才 0.18，几乎无人能到
+#: 0.3 —— 门槛按 0.3 定会让第一档永远为空、每次都降级。这里取 0.15，
+#: 大致对应"至少命中 2 个关键词"，既有区分度又够得着。
+INFLUENCE_FLOOR = 0.35
+TOPIC_FLOOR = 0.15
+
 
 def rebalance_selected_roles(
     selected_nodes: list[SelectedNode],
@@ -149,70 +188,58 @@ class Selector:
             node for node in candidate_nodes if not node.eligible
         ]
 
-        selected_nodes: list[SelectedNode] = []
-        used_ids: set[str] = set()
-        llm_selection_plan = self._llm_selection_plan(
-            score_result=score_result,
-            safe_pool=safe_pool,
-            max_selected=max_selected,
-            workspace_root=workspace_root,
-            use_llm=use_llm,
-            llm_client=llm_client,
-        )
-        preferred_roles = self._preferred_roles(score_result, llm_selection_plan)
-        safe_pool = self._reorder_pool_with_llm(safe_pool, llm_selection_plan)
+        # ---- 按身份依次定量挑选 ----
+        #
+        # 与旧实现的两点本质差别：
+        #   1) 选人与定身份合成一步：先定首发，再从**剩下的人**里定扩散，依次类推，
+        #      因此不再需要事后 rebalance（它会用固定顺序覆盖这里的身份）；
+        #   2) 风险的门槛仍然生效：先 safe（合格且不需复核），不够退到 review，
+        #      最后才动用 fallback。
+        #
+        # LLM 选人指导暂时不参与（见 _make_selected_node 的 llm_selection_plan=None）。
+        # LLM 选人指导暂时不参与：身份完全由指标决定，保证结果可复现。
+        llm_selection_plan: dict[str, Any] | None = None
+        tiered_pool: list[NodeScore] = safe_pool + review_pool + fallback_pool
+        quotas = self._role_quotas(max_selected)
 
-        for role in preferred_roles:
-            if len(selected_nodes) >= max_selected:
-                break
-            candidate = self._first_by_role(
-                safe_pool,
-                role,
-                used_ids,
-                llm_selection_plan=llm_selection_plan,
-            )
-            if candidate is not None:
+        remaining: list[NodeScore] = list(tiered_pool)
+        picks: dict[str, list[NodeScore]] = {}
+
+        # ① 首发：影响力 + 话题匹配度，两者都过线优先，人数不够再逐级降级
+        picks["core_publish_node"] = self._pick_launch_nodes(
+            remaining, quotas["core_publish_node"]
+        )
+
+        # ② 扩散：从剩下的人里按传播力取
+        remaining = self._without(remaining, picks["core_publish_node"])
+        picks["amplification_node"] = self._pick_top(
+            remaining, quotas["amplification_node"], lambda node: node.diffusion_score
+        )
+
+        # ③ 互动：活跃度 + 归一化评论数
+        remaining = self._without(remaining, picks["amplification_node"])
+        picks["interaction_response_node"] = self._pick_top(
+            remaining,
+            quotas["interaction_response_node"],
+            self._interaction_score(remaining),
+        )
+
+        # ④ 支持：最后剩下的人
+        remaining = self._without(remaining, picks["interaction_response_node"])
+        picks["support_node"] = remaining[: quotas["support_node"]]
+
+        selected_nodes: list[SelectedNode] = []
+        for role in ROLE_ASSIGN_ORDER:
+            for node in picks.get(role, []):
                 selected_nodes.append(
                     self._make_selected_node(
-                        candidate,
+                        node,
                         len(selected_nodes) + 1,
                         "primary",
-                        llm_selection_plan=llm_selection_plan,
+                        forced_role=role,
                     )
                 )
-                used_ids.add(candidate.user_id)
-
-        for candidate in safe_pool:
-            if len(selected_nodes) >= max_selected:
-                break
-            if candidate.user_id in used_ids:
-                continue
-            selected_nodes.append(
-                self._make_selected_node(
-                    candidate,
-                    len(selected_nodes) + 1,
-                    "primary",
-                    llm_selection_plan=llm_selection_plan,
-                )
-            )
-            used_ids.add(candidate.user_id)
-
-        for candidate in review_pool:
-            if len(selected_nodes) >= max_selected:
-                break
-            if candidate.user_id in used_ids:
-                continue
-            selected_nodes.append(
-                self._make_selected_node(
-                    candidate,
-                    len(selected_nodes) + 1,
-                    "primary",
-                    llm_selection_plan=llm_selection_plan,
-                )
-            )
-            used_ids.add(candidate.user_id)
-
-        selected_nodes = self._rebalance_selected_roles(selected_nodes)
+        used_ids = {node.user_id for node in selected_nodes}
 
         # fallback 数量与 max_selected 挂钩（最多 max_selected*2，下限 5）。
         # 同时去重：同一 user_id 只出现一次。
@@ -266,6 +293,104 @@ class Selector:
             selected_nodes=selected_nodes,
             fallback_nodes=fallback_nodes,
         )
+
+    # ---------------- 多人协同身份分配 ----------------
+
+    def _role_quotas(self, total: int) -> dict[str, int]:
+        """按占比切分各身份人数。
+
+        * 首发 20%、扩散 40%、互动 20%，支持拿走剩余名额；
+        * 首发与扩散保底 1 人，互动与支持允许为 0；
+        * 任一步都不允许超出 ``total``——总人数不足时后面的身份让位。
+        """
+
+        total = max(int(total), 2)  # N 不允许小于 2
+        quotas: dict[str, int] = {}
+        assigned = 0
+        for role in ("core_publish_node", "amplification_node", "interaction_response_node"):
+            want = int(round(total * ROLE_QUOTA_RATIO[role]))
+            want = max(want, ROLE_MIN_COUNT[role])
+            want = min(want, total - assigned)
+            quotas[role] = max(0, want)
+            assigned += quotas[role]
+        quotas["support_node"] = max(0, total - assigned)
+        return quotas
+
+    @staticmethod
+    def _without(pool: list[NodeScore], picked: list[NodeScore]) -> list[NodeScore]:
+        """从池子里剔除已选中的人——保证一个人只会拿到一个身份。"""
+
+        picked_ids = {node.user_id for node in picked}
+        return [node for node in pool if node.user_id not in picked_ids]
+
+    def _pick_by_tiers(
+        self,
+        pool: list[NodeScore],
+        count: int,
+        score_key,
+        tiers,
+    ) -> list[NodeScore]:
+        """按档位依次补足：高档位选不够就往低档位退。
+
+        ``tiers`` 按"严格 → 宽松"排列，每一项是 ``(node) -> bool`` 过滤器。
+        """
+
+        chosen: list[NodeScore] = []
+        used: set[str] = set()
+        for tier_filter in tiers:
+            if len(chosen) >= count:
+                break
+            candidates = [n for n in pool if n.user_id not in used and tier_filter(n)]
+            candidates.sort(key=score_key, reverse=True)
+            for node in candidates:
+                if len(chosen) >= count:
+                    break
+                chosen.append(node)
+                used.add(node.user_id)
+        return chosen
+
+    def _pick_launch_nodes(self, pool: list[NodeScore], count: int) -> list[NodeScore]:
+        """首发：影响力 + 话题匹配度（直接相加排序）。
+
+        三档降级：
+          1) 两者都过线 —— 最理想；
+          2) 只有影响力过线 —— 话题不够但人够强；
+          3) 不看门槛 —— 兜底，保证人数一定凑得齐。
+        """
+
+        def score(node: NodeScore) -> float:
+            return node.influence_score + node.topic_match_score
+
+        tiers = [
+            lambda n: n.influence_score > INFLUENCE_FLOOR
+            and n.topic_match_score > TOPIC_FLOOR,
+            lambda n: n.influence_score > INFLUENCE_FLOOR,
+            lambda n: True,
+        ]
+        return self._pick_by_tiers(pool, count, score, tiers)
+
+    def _pick_top(self, pool: list[NodeScore], count: int, score_key) -> list[NodeScore]:
+        """按单一指标取 top count。"""
+
+        if count <= 0:
+            return []
+        return sorted(pool, key=score_key, reverse=True)[:count]
+
+    @staticmethod
+    def _interaction_score(pool: list[NodeScore]):
+        """互动排序键：活跃度 + 归一化评论数。
+
+        评论数是原始计数（实测 p50=77、max=5926），与 0~1 的活跃度量纲不同，
+        直接相加会被长尾主导，因此先按池内最大值归一化到 0~1 再相加。
+        """
+
+        max_comment = max((node.received_comment_count for node in pool), default=0)
+
+        def score(node: NodeScore) -> float:
+            normalized = node.received_comment_count / max_comment if max_comment else 0.0
+            return node.activity_score + normalized
+
+        return score
 
     def _filter_nodes_by_platform(
         self,
@@ -429,9 +554,16 @@ class Selector:
         selection_rank: int,
         selection_bucket: str,
         llm_selection_plan: dict[str, Any] | None = None,
+        *,
+        forced_role: str | None = None,
     ) -> SelectedNode:
         role_hint = self._resolved_role_hint(node, llm_selection_plan)
-        selected_role = self._selected_role(role_hint)
+        if forced_role:
+            # 身份分配阶段定好的身份就是最终身份，不再让特征层的 role_hint 猜测覆盖。
+            selected_role = forced_role
+            role_hint = self._role_hint_for_selected_role(forced_role)
+        else:
+            selected_role = self._selected_role(role_hint)
         dispatch_stage = self._dispatch_stage(role_hint)
         dispatch_priority = self._dispatch_priority(node.priority_tier)
         selection_reasons = list(node.selection_reasons)

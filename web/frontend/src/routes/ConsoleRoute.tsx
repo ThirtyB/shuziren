@@ -444,6 +444,7 @@ export default function ConsoleRoute() {
 
         <ResultPanel
           runId={run?.run_id ?? null}
+          run={run}
           result={selectedResult}
           payload={detail}
           trace={trace}

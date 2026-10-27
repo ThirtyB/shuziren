@@ -221,6 +221,18 @@ class BGESemanticEncoder:
 
     # ---------------- 预计算 ----------------
 
+    def _resolve_dim(self) -> int:
+        """取向量维度，兼容 torch 与 ONNX 两种加载路径。
+
+        ``_ensure_model`` 在存在 ONNX 目录时会走 ONNX 分支，此时 ``self._model``
+        保持为 None，直接读 ``.config.hidden_size`` 会抛 AttributeError。
+        这里按「torch 配置 → 实际编码一次拿输出维度」的顺序兜底。
+        """
+
+        if self._model is not None:
+            return int(self._model.config.hidden_size)
+        return int(self._encode_batch(["无"], is_query=False).shape[1])
+
     def fit(self, profiles: dict[str, Any], *, log_every: int = 50) -> SemanticIndex:
         """对全部节点档案批量编码，返回语义索引。
 
@@ -232,7 +244,7 @@ class BGESemanticEncoder:
             raise ValueError("profiles 为空，无法构建语义索引")
 
         self._ensure_model()
-        dim = int(self._model.config.hidden_size)
+        dim = self._resolve_dim()
         embeddings = np.zeros((len(user_ids), dim), dtype=np.float32)
 
         total_batches = (len(user_ids) + self.batch_size - 1) // self.batch_size

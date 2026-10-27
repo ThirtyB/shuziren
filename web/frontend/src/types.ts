@@ -44,6 +44,8 @@ export type RunStatus = {
   trace_dir: string;
   results: RunResult[];
   errors: RunError[];
+  /** 端到端耗时（秒）：从收到请求到本次运行产出结果。进行中为 null。 */
+  elapsed_seconds: number | null;
 };
 
 export type RunResult = {
@@ -69,6 +71,8 @@ export type RunResult = {
     safe_shortfall_count?: unknown;
     selected_user_ids?: string[];
   }>;
+  /** 本轮评估各模块耗时（秒）：键为模块名，值为墙钟耗时。用于「!」展开查看。 */
+  stage_times?: Record<string, number>;
 };
 
 export type RunError = {

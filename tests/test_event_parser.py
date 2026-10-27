@@ -33,14 +33,15 @@ class EventParserTest(unittest.TestCase):
     def test_parses_natural_language_event(self) -> None:
         parser = RuleBasedEventParser()
         parsed = parser.parse(
-            "希望围绕亲子阅读和英语启蒙做一次传播活动，重点提升讨论度，并控制刷屏争议。"
+            "希望围绕人工智能等科技领域的算法监管和数据安全政策做一次传播活动，"
+            "重点提升讨论度，并控制刷屏争议。"
         )
 
         self.assertEqual(parsed.product_name, "abc_reading")
-        self.assertEqual(parsed.event_type, "english_learning_engagement")
+        self.assertEqual(parsed.event_type, "tech_ai")
         self.assertEqual(parsed.target_goal, "engagement")
-        self.assertIn("parent_child", parsed.target_audience)
-        self.assertIn("english_learning", parsed.target_audience)
+        self.assertIn("tech_audience", parsed.target_audience)
+        self.assertIn("security_strategy", parsed.target_audience)
         self.assertEqual(parsed.constraints.risk_level, "medium")
 
     def test_respects_explicit_payload_fields(self) -> None:
@@ -49,8 +50,8 @@ class EventParserTest(unittest.TestCase):
             {
                 "event_id": "evt_manual_001",
                 "product_name": "abc_reading",
-                "event_title": "争议回应",
-                "event_description": "针对近期投诉和质疑做一次集中回应与澄清。",
+                "event_title": "货币政策回应",
+                "event_description": "针对近期加息和通胀压力做一次集中回应与澄清。",
                 "target_goal": "response",
                 "target_audience": ["general_public"],
                 "constraints": {"max_selected_nodes": 6, "risk_level": "high"},
@@ -59,7 +60,7 @@ class EventParserTest(unittest.TestCase):
 
         self.assertEqual(parsed.event_id, "evt_manual_001")
         self.assertEqual(parsed.target_goal, "response")
-        self.assertEqual(parsed.event_type, "public_opinion_response")
+        self.assertEqual(parsed.event_type, "macro_economy")
         self.assertEqual(parsed.constraints.max_selected_nodes, 6)
         self.assertEqual(parsed.constraints.risk_level, "high")
         self.assertIn("general_public", parsed.target_audience)

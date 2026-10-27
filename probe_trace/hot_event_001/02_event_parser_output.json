@@ -1,0 +1,88 @@
+{
+  "event_id": "hot_event_001",
+  "product_name": "abc_reading",
+  "event_title": "红海航运安全形势持续紧张，多国加强护航协调",
+  "event_description": "红海航运安全形势持续紧张，多国加强护航协调\n红海及周边海域航运风险上升，部分国家和航运企业调整航线、保险和护航安排。\n热点领域: military\n传播目标: 提示公众关注红海航运安全对全球物流、贸易成本和供应链稳定性的影响，并引导理性讨论风险外溢。\n任务约束: 输出影响力事件分发策略，不要按照商品推荐任务理解。\n热点叙述变体:\n1. 红海这轮航运紧张还没降温，多国开始加大护航协作，后续海运成本可能继续受影响。\n2. 现在红海航线的安全问题已经不只是军事新闻了，保险费、绕航时间和全球物流都会被牵动。\n3. 多国加强护航说明局势仍然敏感，短期内航运公司大概率不会轻易恢复原来的路线。\n4. 红海局势一紧张，最先反映出来的就是航运价格和交付周期，外贸企业要提前做预案。\n5. 这次护航协调升级，本质上是各方在给关键能源和商品运输通道上保险。\n6. 别只看军舰出动，红海风险背后影响的是全球供应链稳定性。\n7. 航运企业绕行好望角不是小事，时间和燃油成本都会传导到商品价格里。\n8. 红海安全问题如果继续拖下去，区域冲突外溢对国际贸易的冲击会更明显。\n9. 多国护航只能降低风险，真正让航线恢复正常还得看地区局势能不能缓和。\n10. 红海航运紧张再次说明，关键海上通道的安全已经是全球经济问题。",
+  "target_goal": "提示公众关注红海航运安全对全球物流、贸易成本和供应链稳定性的影响，并引导理性讨论风险外溢。",
+  "event_type": "industry_supply_chain",
+  "target_audience": [
+    "general_public",
+    "industry_professional",
+    "international_audience",
+    "security_strategy",
+    "livelihood_public"
+  ],
+  "extracted_keywords": [
+    "军事",
+    "保险",
+    "能源",
+    "供应链",
+    "物流",
+    "航运",
+    "航线",
+    "讨论",
+    "传播",
+    "稳定",
+    "企业",
+    "国际"
+  ],
+  "constraints": {
+    "risk_level": "high",
+    "max_selected_nodes": 6,
+    "max_frequency_per_day": 3,
+    "campaign_window_hours": 24,
+    "allowed_platforms": [
+      "facebook"
+    ]
+  },
+  "semantic_tags": [
+    "general_public",
+    "industry_professional",
+    "international_audience",
+    "security_strategy",
+    "livelihood_public",
+    "军事",
+    "保险",
+    "能源",
+    "供应链",
+    "物流",
+    "航运"
+  ],
+  "narrative_frames": [
+    "信息触达",
+    "摘要扩散"
+  ],
+  "sensitive_entities": [],
+  "target_roles": [
+    "core_publish_node",
+    "interaction_response_node",
+    "support_node"
+  ],
+  "negative_constraints": [
+    "避免节点内容完全同质化",
+    "避免情绪化和对立化表达",
+    "避免未经证实的推测性扩写"
+  ],
+  "dispatch_preferences": {
+    "candidate_pool_size": 36,
+    "rerank_top_k": 18,
+    "semantic_weight": 0.42,
+    "diversity_weight": 0.16,
+    "risk_weight": 0.26,
+    "preferred_roles": [],
+    "preferred_narrative": []
+  },
+  "parser_name": "rule_based_v1",
+  "reasoning": [
+    "event_type=industry_supply_chain",
+    "matched_keywords=供应链,物流,航运,航线",
+    "target_goal=explicit:提示公众关注红海航运安全对全球物流、贸易成本和供应链稳定性的影响，并引导理性讨论风险外溢。",
+    "target_audience=explicit:general_public",
+    "target_audience=inferred:general_public,industry_professional,international_audience,security_strategy,livelihood_public",
+    "risk_level=high"
+  ],
+  "llm_metadata": {
+    "requested": false,
+    "used": false
+  }
+}

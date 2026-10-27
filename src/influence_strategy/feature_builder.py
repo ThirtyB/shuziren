@@ -203,6 +203,7 @@ class FeatureBuilder:
                 dispatch_platform=dispatch_platform,
                 size=recall_size,
                 source_user_ids=source_user_ids,
+                workspace_root=workspace_root,
             )
 
         return self.build_features(
@@ -227,20 +228,26 @@ class FeatureBuilder:
         dispatch_platform: str | None = None,
         size: int = 200,
         source_user_ids: set[str] | None = None,
+        workspace_root: str | Path | None = None,
     ) -> set[str]:
-        """platform_aware 分层召回 size 个 user_id。
+        """召回与事件最相关的 size 个 user_id（单一混合排序，不再分桶）。
 
-        复刻 ``_candidate_pool_for_llm`` (feature_builder.py:963-1035) 的 4 桶逻辑，
-        但使用**廉价 raw 字段**而非归一化 score：
-          1) recall 在 build_features 之前，5 个 log_score 归一化分母尚未计算；
-          2) 4 个 log_score 内部是单调变换，raw 排序与归一化排序等价。
+        排序键（全部降序）：
+          1) ``kw_hits``  字面关键词命中数 —— 直接对应"与关键词最相关"；
+          2) ``semantic`` BGE 语义相关度 —— 关键词数相同时决定先后，
+             同时承担兜底职责：关键词命中人数不足 size 时，
+             剩余名额自动由语义最相关的节点填补；
+          3) 图活跃度 / 粉丝数 —— 前两者分不出高下时的最终裁决。
 
-        桶排序键：
-          - topic_bucket: (kw_hits, neighbors+interactions, followers)
-          - interaction_bucket: is_source or activity-like; (received+made, followers, friends)
-          - diffusion_bucket: (neighbor+received+made, followers, friends)
-          - baseline_bucket: 原顺序
-        配额：``generic_high_influence_cap = max(2, size // 6)``，与现有 4 桶一致。
+        仍然使用**廉价 raw 字段**而非归一化 score（与旧实现同因）：
+          1) recall 在 build_features 之前，5 个 log_score 的分母尚未算出；
+          2) log 是单调变换，raw 排序与归一化排序等价。
+
+        泛大V（关键词零命中但粉丝量大）保留少量席位 ``max(2, size // 20)``，
+        因为它们靠关键词进不来，但对扩散有实际价值。
+
+        ``workspace_root`` 用于取 BGE 语义分；为 None 或本地模型缺失时语义分
+        全为 0，自动退化为纯关键词排序，不会报错。
         """
         from .platform_profiles import normalize_platform_key
 
@@ -257,7 +264,9 @@ class FeatureBuilder:
         keywords = self._prepare_keywords(self._event_match_keywords(event))
         kw_count = len(keywords) or 1
         source_set = source_user_ids or set()
-        cap = max(2, size // 6)
+        #: 泛大V 保留席位：关键词零命中但粉丝量大的账号靠关键词进不来，
+        #: 但对扩散有实际价值，预留少量名额（旧配额的 1/3，避免稀释相关性）。
+        big_v_cap = max(2, size // 20)
 
         items: list[dict[str, Any]] = []
         for uid, p in pool:
@@ -299,67 +308,85 @@ class FeatureBuilder:
                 }
             )
 
-        diversified: list[dict[str, Any]] = []
-        used: set[str] = set()
+        # ---- 混合排序：关键词命中优先，语义相关度兜底 ----
+        semantic_map = self._recall_semantic_scores(
+            workspace_root=workspace_root,
+            user_ids=[item["user_id"] for item in items],
+            event=event,
+        )
 
-        def add(sorted_items: list[dict[str, Any]], generic_cap: int | None = None) -> None:
-            generic_count = 0
-            for c in sorted_items:
-                if len(diversified) >= size:
-                    return
-                if c["user_id"] in used:
-                    continue
-                if generic_cap is not None and c["is_generic_hi"]:
-                    if generic_count >= generic_cap:
-                        continue
-                    generic_count += 1
-                diversified.append(c)
-                used.add(c["user_id"])
-
-        # topic_bucket
-        add(
-            sorted(
-                items,
-                key=lambda c: (
-                    c["kw_hits"],
-                    c["topic_score"],
-                    c["neighbor"] + c["received"],
-                    c["followers"],
-                ),
-                reverse=True,
+        def rank_key(item: dict[str, Any]) -> tuple[Any, ...]:
+            return (
+                item["kw_hits"],
+                semantic_map.get(item["user_id"], 0.0),
+                item["neighbor"] + item["received"],
+                item["followers"],
             )
-        )
-        # interaction_bucket
-        add(
-            sorted(
-                [c for c in items if c["is_interaction_like"]],
-                key=lambda c: (
-                    c["received"] + c["made"],
-                    c["followers"],
-                    c["friends"],
-                    c["neighbor"],
-                ),
-                reverse=True,
-            ),
-            generic_cap=cap,
-        )
-        # diffusion_bucket
-        add(
-            sorted(
-                items,
-                key=lambda c: (
-                    c["neighbor"] + c["received"] + c["made"],
-                    c["followers"],
-                    c["friends"],
-                ),
-                reverse=True,
-            ),
-            generic_cap=cap,
-        )
-        # baseline_bucket
-        add(items, generic_cap=cap)
 
-        return {c["user_id"] for c in diversified[:size]}
+        ordered = sorted(items, key=rank_key, reverse=True)
+
+        # 泛大V 单独取：它们 kw_hits 恒为 0，在主榜里永远垫底，
+        # 因此单独按 (语义分, 粉丝数) 选 big_v_cap 个，再从主榜腾出等量名额。
+        big_v_pool = sorted(
+            (item for item in items if item["is_generic_hi"]),
+            key=lambda item: (semantic_map.get(item["user_id"], 0.0), item["followers"]),
+            reverse=True,
+        )[:big_v_cap]
+        reserved = {item["user_id"] for item in big_v_pool}
+
+        chosen: list[dict[str, Any]] = []
+        used: set[str] = set()
+        main_quota = size - len(big_v_pool)
+        for item in ordered:
+            if len(chosen) >= main_quota:
+                break
+            if item["user_id"] in used or item["user_id"] in reserved:
+                continue
+            chosen.append(item)
+            used.add(item["user_id"])
+
+        for item in big_v_pool:
+            if len(chosen) >= size:
+                break
+            if item["user_id"] in used:
+                continue
+            chosen.append(item)
+            used.add(item["user_id"])
+
+        return {item["user_id"] for item in chosen[:size]}
+
+    def _recall_semantic_scores(
+        self,
+        *,
+        workspace_root: str | Path | None,
+        user_ids: list[str],
+        event: ParsedEvent,
+    ) -> dict[str, float]:
+        """召回阶段的 BGE 语义相关度。
+
+        本地模型缺失或 ``workspace_root`` 为 None 时返回空 dict，召回自动
+        退化为纯关键词排序——保证无模型环境（如部分单测）不会报错。
+
+        语义分是对全库做一次矩阵乘法得到的（约 30ms），"算全库"与"只算
+        user_ids" 成本几乎相同，因此这里直接复用全量结果。
+        """
+
+        if not workspace_root or not user_ids:
+            return {}
+        try:
+            from .local_models import load_local_models
+            from .local_semantic import build_event_text
+        except ImportError:
+            return {}
+
+        local_models = load_local_models(workspace_root)
+        if local_models is None:
+            return {}
+        try:
+            return local_models.semantic_scores(build_event_text(event))
+        except Exception:  # pragma: no cover - 模型损坏时不应中断召回
+            logger.warning("召回阶段语义打分失败，退化为纯关键词排序", exc_info=True)
+            return {}
 
     def build_features(
         self,
