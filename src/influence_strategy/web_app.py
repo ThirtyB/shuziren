@@ -171,6 +171,18 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    @app.on_event("startup")
+    def _warmup_local_models() -> None:
+        # 预加载本地模型（BGE 语义编码器 + GraphSAGE 图特征），把约 0.8s 的冷启动
+        # 成本从「首个运行请求」挪到「服务启动」时，避免用户第一次点运行要等模型载入。
+        # 模型产物缺失/损坏时静默跳过，不影响服务启动与其余功能。
+        try:
+            from .local_models import load_local_models
+
+            load_local_models(PROJECT_ROOT, warmup=True)
+        except Exception:  # noqa: BLE001 - 预加载失败不应阻止服务启动
+            pass
+
     @app.get("/api/health")
     def health() -> dict[str, Any]:
         return {
@@ -572,17 +584,30 @@ def create_app() -> FastAPI:
 
     @app.get("/api/runs/{run_id}/traces/{event_id}")
     def get_trace_detail(run_id: str, event_id: str) -> dict[str, Any]:
-        trace_dir = _run_dir(run_id) / "trace" / event_id
-        if not trace_dir.exists():
-            raise HTTPException(status_code=404, detail=f"Trace not found: {event_id}")
-        files = []
-        for path in sorted(trace_dir.glob("*.json")):
-            try:
-                payload = _load_json(path)
-            except json.JSONDecodeError:
-                payload = path.read_text(encoding="utf-8")
-            files.append({"name": path.name, "payload": payload})
-        return {"run_id": run_id, "event_id": event_id, "files": files}
+        base_trace_dir = _run_dir(run_id) / "trace"
+        # 1) 单平台 / 多人协同：trace 直接落在 trace/<event_id>。
+        direct = base_trace_dir / event_id
+        if direct.exists():
+            return {
+                "run_id": run_id,
+                "event_id": event_id,
+                "files": _collect_trace_files(direct),
+            }
+        # 2) 跨平台：trace 按平台分目录存放在 trace/<platform>/<event_id>，
+        #    聚合并以「平台名/」作为文件名前缀，避免不同平台文件互相覆盖。
+        files: list[dict[str, Any]] = []
+        if base_trace_dir.exists():
+            for platform_dir in sorted(base_trace_dir.iterdir()):
+                if not platform_dir.is_dir():
+                    continue
+                candidate = platform_dir / event_id
+                if candidate.exists() and candidate.is_dir():
+                    files.extend(
+                        _collect_trace_files(candidate, prefix=f"{platform_dir.name}/")
+                    )
+        if files:
+            return {"run_id": run_id, "event_id": event_id, "files": files}
+        raise HTTPException(status_code=404, detail=f"Trace not found: {event_id}")
 
     @app.get("/api/runs/{run_id}/files/{event_id}")
     def download_result(run_id: str, event_id: str) -> FileResponse:
@@ -943,9 +968,18 @@ def _result_summary(
     )
 
     if dispatch_mode == "cross_platform":
-        summary["per_platform"] = _cross_platform_per_platform(
-            strategy if isinstance(strategy, dict) else {}
-        )
+        summary["per_platform"] = _cross_platform_per_platform(payload)
+        # 跨平台模式顶层没有单一「五维调度策略」，selected ids 由各平台结果整合。
+        selected_ids = [
+            str(uid)
+            for pr in (payload.get("各平台结果") or [])
+            for uid in (
+                (pr.get("五维调度策略") or {})
+                .get("目标对象", {})
+                .get("选取数字人id组", []) or []
+            )
+        ]
+        summary["selected_digital_human_ids"] = selected_ids
         return summary
 
     if dispatch_mode == "single_target":
@@ -960,38 +994,37 @@ def _result_summary(
     return summary
 
 
-def _cross_platform_per_platform(strategy: dict[str, Any]) -> list[dict[str, Any]]:
-    """从五维调度策略的「平台」维度取出逐平台人数与选取 id。
+def _cross_platform_per_platform(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """从多平台聚合结果里取出逐平台人数与选取 id。
 
-    跨平台模式与多人分发共用五维结构，各平台独立的选人结果集中在
-    ``五维调度策略.平台.各平台方案``；结果列表只需要其中的人数与 id，
-    因此在这里做一次窄化映射，而不是把整块平台方案透传给前端。
+    多平台模式把每个平台的完整五维策略放在 ``各平台结果``，结果列表只需窄化出
+    平台、目标/选取人数与 id，供结果列表与前端按平台展示。
     """
-
-    platform_dimension = strategy.get("平台")
-    schemes = (
-        platform_dimension.get("各平台方案")
-        if isinstance(platform_dimension, dict)
-        else None
-    )
-    if not isinstance(schemes, list):
+    platform_results = payload.get("各平台结果") if isinstance(payload, dict) else None
+    if not isinstance(platform_results, list):
         return []
 
     per_platform: list[dict[str, Any]] = []
-    for item in schemes:
-        if not isinstance(item, dict):
+    for pr in platform_results:
+        if not isinstance(pr, dict):
             continue
-        ids = item.get("选取数字人id组") or []
+        ids = [
+            str(u)
+            for u in (
+                (pr.get("五维调度策略") or {})
+                .get("目标对象", {})
+                .get("选取数字人id组", []) or []
+            )
+        ]
         per_platform.append(
             {
-                "platform_key": item.get("平台"),
-                "requested_count": item.get("目标人数"),
-                "selected_count": item.get("选取人数"),
-                "shortfall_count": item.get("人数缺口"),
-                "safe_shortfall_count": item.get("合格缺口"),
-                "selected_user_ids": [
-                    str(user_id) for user_id in ids if user_id is not None
-                ],
+                "platform_key": pr.get("平台"),
+                "requested_count": pr.get("目标人数"),
+                "selected_count": pr.get("选取人数"),
+                "shortfall_count": max(
+                    0, int(pr.get("目标人数", 0)) - int(pr.get("选取人数", 0))
+                ),
+                "selected_user_ids": ids,
             }
         )
     return per_platform
@@ -1119,6 +1152,20 @@ def _now() -> str:
 
 def _load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _collect_trace_files(trace_dir: Path, prefix: str = "") -> list[dict[str, Any]]:
+    """读取某个 trace 目录下的 *.json，整理成前端 TraceSection 需要的结构。"""
+    files: list[dict[str, Any]] = []
+    if not trace_dir.exists():
+        return files
+    for path in sorted(trace_dir.glob("*.json")):
+        try:
+            payload = _load_json(path)
+        except json.JSONDecodeError:
+            payload = path.read_text(encoding="utf-8")
+        files.append({"name": prefix + path.name, "payload": payload})
+    return files
 
 
 def _summarize_benchmark(

@@ -9,15 +9,17 @@ import { buildOptions, type SharedScenarioProps } from "./SingleTargetScenario";
 /**
  * 场景 3：跨平台并行分发。
  *
- * 与多人协同分发的关键区别：每个平台独立指定人数，PlatformDispatcher 按
- * 平台自身 requested_count 在该平台已有的数字人中独立选人，正文与动作
- * 由各平台 content_plan 模板独立生成，输出 JSON 不含旧版五维调度策略。
+ * 用户输入「时间窗口 + 系统事件 + 各平台人数」，每个平台被拆成一条独立的多人协同
+ * 任务，**完全复用**多人协同管线（Selector + StrategyGenerator），并行执行；各平台
+ * 产出与单平台完全同构的五维调度策略，最后只做整合输出。进阶参数（风险等级 / 频率
+ * 上限 / Profile 限制）不在本场景暴露，保持默认值即可。
  */
 export function CrossPlatformScenario(props: SharedScenarioProps) {
   const { eventPayload, isRunning, onStart, onError } = props;
   const [specs, setSpecs] = useState<PlatformSpecPayload[]>([
-    { platform_key: SIMULATED_PLATFORMS[0].key, requested_count: 3 },
-    { platform_key: SIMULATED_PLATFORMS[2].key, requested_count: 3 },
+    { platform_key: SIMULATED_PLATFORMS[0].key, requested_count: 5 },
+    { platform_key: SIMULATED_PLATFORMS[1].key, requested_count: 5 },
+    { platform_key: SIMULATED_PLATFORMS[2].key, requested_count: 5 },
   ]);
   const [busy, setBusy] = useState(false);
 
@@ -25,10 +27,12 @@ export function CrossPlatformScenario(props: SharedScenarioProps) {
     setSpecs((prev) => prev.map((item, i) => (i === index ? { ...item, ...patch } : item)));
   }
   function addSpec() {
-    setSpecs((prev) => [
-      ...prev,
-      { platform_key: SIMULATED_PLATFORMS[1].key, requested_count: 2 },
-    ]);
+    setSpecs((prev) => {
+      const used = new Set(prev.map((item) => item.platform_key));
+      const next =
+        SIMULATED_PLATFORMS.find((item) => !used.has(item.key)) ?? SIMULATED_PLATFORMS[0];
+      return [...prev, { platform_key: next.key, requested_count: 5 }];
+    });
   }
   function removeSpec(index: number) {
     setSpecs((prev) => (prev.length > 1 ? prev.filter((_, i) => i !== index) : prev));
@@ -133,9 +137,11 @@ export function CrossPlatformScenario(props: SharedScenarioProps) {
           setProfileLimit={props.setProfileLimit}
           allowedPlatforms={props.allowedPlatforms}
           setAllowedPlatforms={props.setAllowedPlatforms}
-          // 跨平台：每个平台独立 requested_count（已在专属参数里配置）。
+          // 跨平台：每个平台独立 requested_count（已在专属参数里配置），
+          // 进阶参数（风险等级 / 频率上限 / Profile 限制）保持默认值，不在此暴露。
           showMaxSelectedNodes={false}
           showAllowedPlatforms={false}
+          showAdvancedOptions={false}
         />
       </div>
 

@@ -88,7 +88,8 @@ export function ResultPanel({
   trace: Record<string, unknown> | null;
   loading: boolean;
 }) {
-  const [showModules, setShowModules] = useState(false);
+  // 各模块耗时默认常驻显示（不再需要点「!」展开）。
+  const [showModules, setShowModules] = useState(true);
   return (
     <section className="panel result-panel">
       <div className="result-head">
@@ -144,15 +145,12 @@ export function ResultPanel({
             <SingleTargetDetail payload={payload} result={result} />
           )}
 
-          {result.dispatch_mode === "cross_platform" && (
-            <CrossPlatformOverview payload={payload} />
+          {result.dispatch_mode === "multi_user" && (
+            <FiveDimension payload={payload} />
           )}
 
-          {/* 多人分发与跨平台分发共用同一套五维调度策略结构，
-              跨平台只是多出「平台」维度下的各平台方案。 */}
-          {(result.dispatch_mode === "multi_user" ||
-            result.dispatch_mode === "cross_platform") && (
-            <FiveDimension payload={payload} />
+          {result.dispatch_mode === "cross_platform" && (
+            <CrossPlatformDetail payload={payload} />
           )}
 
           <TraceSection trace={trace} />
@@ -163,6 +161,94 @@ export function ResultPanel({
         </div>
       )}
     </section>
+  );
+}
+
+/**
+ * 跨平台分发详情：顶部一个「总览」Tab 给跨平台级整合汇总，其余每个平台一个 Tab，
+ * 直接渲染该平台**完整且独立**的五维调度策略（复用 ``FiveDimension``），从而实现
+ * "每个平台与单平台完全一样、总览只是整合一下呈现"的诉求。
+ *
+ * 后端多平台模式 = 逐平台复用多人协同（Selector + StrategyGenerator）全链路，
+ * 每个平台在 ``各平台结果`` 里就是一份与单平台同构的五维策略（含动作清单、时间 /
+ * 频率 / 内容计划），因此这里无需做任何裁剪，原样交给 ``FiveDimension`` 即可。
+ * 各平台 Tab 内只渲染五维策略本身；逐平台的分阶段耗时统一由顶部「运行耗时」常驻
+ * 展示，不再于每个平台段重复内嵌，避免冗余。
+ */
+function CrossPlatformDetail({
+  payload,
+}: {
+  payload: Record<string, unknown>;
+}) {
+  const platforms =
+    (payload["各平台结果"] as Array<Record<string, unknown>> | undefined) ?? [];
+
+  const [tab, setTab] = useState<string>("__overview__");
+  const tabs = [
+    { key: "__overview__", label: "总览" },
+    ...platforms.map((p, i) => {
+      const key = String(p["平台"] ?? i);
+      return { key, label: platformLabel(key) };
+    }),
+  ];
+  const active =
+    tab === "__overview__"
+      ? null
+      : platforms.find((p) => String(p["平台"] ?? "") === tab) ?? null;
+
+  return (
+    <div className="stack">
+      <div
+        style={{
+          display: "flex",
+          gap: 8,
+          flexWrap: "wrap",
+          borderBottom: "1px solid #e5e7eb",
+          paddingBottom: 8,
+        }}
+      >
+        {tabs.map((t) => (
+          <button
+            key={t.key}
+            type="button"
+            onClick={() => setTab(t.key)}
+            style={{
+              padding: "6px 14px",
+              borderRadius: 8,
+              border: "1px solid #d1d5db",
+              background: tab === t.key ? "#2563eb" : "#fff",
+              color: tab === t.key ? "#fff" : "#111827",
+              cursor: "pointer",
+              fontWeight: 600,
+            }}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "__overview__" ? (
+        <CrossPlatformOverview payload={payload} />
+      ) : active ? (
+        <div className="stack">
+          <div className="summary-band">
+            <div>
+              <span>目标人数</span>
+              <strong>{Number(active["目标人数"] ?? 0)}</strong>
+            </div>
+            <div>
+              <span>选取人数</span>
+              <strong>{Number(active["选取人数"] ?? 0)}</strong>
+            </div>
+          </div>
+          <FiveDimension
+            payload={{
+              五维调度策略: active["五维调度策略"] as Record<string, unknown>,
+            }}
+          />
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -517,17 +603,22 @@ function ActionListView({
  * 信息从 UI 移除——这些字段仍保留在后端 payload 中，便于后续按需取回。
  */
 function CrossPlatformOverview({ payload }: { payload: Record<string, unknown> }) {
-  const strategy = payload["五维调度策略"] as Record<string, unknown> | undefined;
-  const platform = strategy?.["平台"] as Record<string, unknown> | undefined;
-  const overview =
-    (platform?.["跨平台总览"] as Record<string, unknown> | undefined) ?? {};
-  const tiers =
-    (overview["安全等级分布"] as Record<string, unknown> | undefined) ?? {};
+  const overview = (payload["跨平台总览"] as Record<string, unknown> | undefined) ?? {};
   const overlaps = (overview["跨平台重复数字人"] as string[] | undefined) ?? [];
-  const target = strategy?.["目标对象"] as Record<string, unknown> | undefined;
-  const division =
-    (target?.["数字人分工"] as Array<Record<string, unknown>> | undefined) ?? [];
-  const idMap = buildIdMap(division);
+
+  // 跨平台重复数字人 / 各平台选取数字人的编号映射：从各平台五维策略的数字人分工
+  // 里收集，保证总览里的重复 id 与各平台 id 都能显示成 D01… 编号。
+  const platforms =
+    (payload["各平台结果"] as Array<Record<string, unknown>> | undefined) ?? [];
+  const allDivision: Array<Record<string, unknown>> = [];
+  for (const p of platforms) {
+    const strat = (p["五维调度策略"] as Record<string, unknown> | undefined) ?? {};
+    const target = (strat["目标对象"] as Record<string, unknown> | undefined) ?? {};
+    const div =
+      (target["数字人分工"] as Array<Record<string, unknown>> | undefined) ?? [];
+    allDivision.push(...div);
+  }
+  const idMap = buildIdMap(allDivision);
 
   return (
     <section className="result-section highlight">
@@ -553,13 +644,6 @@ function CrossPlatformOverview({ payload }: { payload: Record<string, unknown> }
           <span>合格缺口合计</span>
           <strong>{Number(overview["合格缺口合计"] ?? 0)}</strong>
         </div>
-        <div>
-          <span>安全等级分布</span>
-          <strong>
-            合格 {Number(tiers["合格"] ?? 0)} / 复核 {Number(tiers["待人工复核"] ?? 0)} /
-            不合格 {Number(tiers["未通过资格筛选"] ?? 0)}
-          </strong>
-        </div>
       </div>
       {overlaps.length > 0 && (
         <>
@@ -571,6 +655,31 @@ function CrossPlatformOverview({ payload }: { payload: Record<string, unknown> }
           </div>
         </>
       )}
+
+      {/* 总览＝把各平台的完整结果拼接展示：每个平台一段五维策略（含各自的各模块耗时）。 */}
+      <div className="stack">
+        {platforms.map((p, i) => {
+          const key = String(p["平台"] ?? i);
+          return (
+            <section key={key} className="sub-section">
+              <h3>平台 · {platformLabel(key)}</h3>
+              <div className="summary-band">
+                <div>
+                  <span>目标人数</span>
+                  <strong>{Number(p["目标人数"] ?? 0)}</strong>
+                </div>
+                <div>
+                  <span>选取人数</span>
+                  <strong>{Number(p["选取人数"] ?? 0)}</strong>
+                </div>
+              </div>
+              <FiveDimension
+                payload={{ 五维调度策略: p["五维调度策略"] as Record<string, unknown> }}
+              />
+            </section>
+          );
+        })}
+      </div>
     </section>
   );
 }

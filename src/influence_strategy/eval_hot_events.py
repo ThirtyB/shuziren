@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Literal, Sequence
 
 from .content_arsenal import (
@@ -23,30 +24,17 @@ from .models import (
     FeatureBuildSummary,
     NodeScore,
     ScoreResult,
-    SelectedNode,
     StrategyNodePlan,
     StrategyResult,
 )
 from .pipeline import PipelineArtifacts, StrategyPipeline
-from .platform_dispatcher import (
-    MultiPlatformDispatchResult,
-    PlatformDispatcher,
-    PlatformSpec,
-)
+from .platform_dispatcher import PlatformSpec
 from .platform_profiles import (
     DATASET_PLATFORM_VALUES,
     dataset_platform_value,
     is_valid_dataset_platform,
     normalize_platform_key,
 )
-from .selector import (
-    DEFAULT_DISPATCH_STAGE,
-    DEFAULT_SELECTED_ROLE,
-    ROLE_HINT_TO_DISPATCH_STAGE,
-    ROLE_HINT_TO_SELECTED_ROLE,
-    rebalance_selected_roles,
-)
-from .strategy_generator import StrategyGenerator
 
 TRACE_PREVIEW_LIMIT = 25
 
@@ -195,16 +183,16 @@ RUN_ERROR_FILENAME = "run_error.json"
 # 计划与时间计划），把平台差异集中到一处，而不是散在顶层的说明文本里。
 FIVE_DIMENSION_STRATEGY_KEY = "五维调度策略"
 #: 多平台最终业务 JSON 的输出版本标识（区别于旧版 ``action_schema_v5_...``）。
-MULTIPLATFORM_OUTPUT_FORMAT_VERSION = "action_schema_v6_multi_platform_minimal"
+MULTIPLATFORM_OUTPUT_FORMAT_VERSION = "action_schema_v6_multi_platform_reuse"
 MULTIPLATFORM_DRAFT_NOTE = (
-    "以下内容为 PlatformDispatcher 生成的结构化内容草案与动作草案，尚未在任何真实平台发布；"
-    "各平台的数字人选取由 PlatformDispatcher 按平台自身的 requested_count 独立评估得出，"
-    "不是由一次整体选取结果拆分而来，也未使用旧 Selector 的 max_selected_nodes 作为平台人数。"
+    "以下内容为各平台分别复用多人协同（Selector + StrategyGenerator）管线生成的结构化"
+    "内容草案与动作草案，尚未在任何真实平台发布；每个平台都是一次独立的多人协同分发，"
+    "按各自的 requested_count 选人并产出与单平台完全同构的五维调度策略。"
 )
 MULTIPLATFORM_SCOPE_NOTE = (
-    "本文件是多平台分发模式的最终业务结果：五维调度策略的结构与多人分发一致，"
-    "但数字人由 PlatformDispatcher 按平台分别选取，不再经过旧版单平台模拟分发的整体选人；"
-    "各平台的选人依据、安全等级、内容计划与时间计划集中在「平台」维度，便于逐平台核对。"
+    "本文件是多平台分发模式的最终业务结果：每个平台的五维调度策略结构与单人/多人分发"
+    "完全一致（复用同一套协同逻辑），因此前端可逐个平台原样复用多人协同的渲染；"
+    "「跨平台总览」仅对各平台的人数、安全等级与跨平台重复数字人做整合汇总，不另起选人。"
 )
 
 #: ``NodeScore.priority_tier`` → 动作优先级，与 ``Selector._dispatch_priority`` 同源。
@@ -754,6 +742,70 @@ def run_hot_event_multiplatform_evaluations(
     return results
 
 
+def _run_single_platform_evaluation(
+    *,
+    workspace_root: Path,
+    output_dir: Path,
+    trace_dir: Path,
+    hot_event: dict[str, Any],
+    spec: PlatformSpec,
+    profile_limit: int | None,
+    risk_level: str | None,
+    campaign_window_hours: int,
+    max_frequency_per_day: int,
+    allowed_platforms: list[str] | None,
+    use_llm: bool,
+    recall_size: int,
+    recall_mode: str,
+) -> dict[str, Any]:
+    """单条平台任务：一次独立的多人协同分发（在独立线程中执行）。
+
+    直接复用 :func:`_run_hot_event_evaluation`，把输入拆成该平台的「多人协同」任务：
+    ``dispatch_platform=平台``、``max_selected_nodes=该平台目标人数``。产出与单平台
+    多人协同**完全同构** 的五维调度策略（含动作清单），供上层整合成多平台结果。
+    """
+    root = Path(workspace_root)
+    client = None
+    if use_llm:
+        try:
+            client = OpenAICompatibleLLMClient.from_env_files(root)
+        except Exception:
+            client = None
+
+    _, platform_payload, per_stage = _run_hot_event_evaluation(
+        workspace_root=root,
+        output_dir=output_dir,
+        hot_event=hot_event,
+        profile_limit=profile_limit,
+        max_selected_nodes=spec.requested_count,
+        risk_level=risk_level,
+        campaign_window_hours=campaign_window_hours,
+        max_frequency_per_day=max_frequency_per_day,
+        allowed_platforms=allowed_platforms,
+        use_llm=use_llm,
+        llm_client=client,
+        trace_dir=trace_dir,
+        dispatch_platform=spec.platform_key,
+        recall_size=recall_size,
+        recall_mode=recall_mode,
+    )
+
+    strategy = platform_payload.get("五维调度策略", {})
+    target = strategy.get("目标对象", {}) if isinstance(strategy, dict) else {}
+    selected_ids = (
+        target.get("选取数字人id组", []) if isinstance(target, dict) else []
+    )
+    return {
+        "平台": spec.platform_key,
+        "目标人数": spec.requested_count,
+        "选取人数": len(selected_ids),
+        "安全等级分布": _aggregate_safety(strategy),
+        "stage_times": per_stage,
+        "json_output_path": str(_),
+        "五维调度策略": strategy,
+    }
+
+
 def _run_hot_event_multiplatform_evaluation(
     *,
     workspace_root: str | Path,
@@ -772,77 +824,88 @@ def _run_hot_event_multiplatform_evaluation(
     recall_size: int = 200,
     recall_mode: Literal["platform_aware"] = "platform_aware",
 ) -> tuple[Path, dict[str, Any], dict[str, float]]:
+    """多平台分发 = 把输入拆成各平台的独立多人任务，**并行**复用多人协同管线。
+
+    输入是「时间窗口 + 系统事件 + 各平台人数」。每个 ``platform_spec`` 被拆成一条
+    独立的「多人协同分发」任务，直接复用 :func:`_run_hot_event_evaluation`
+    （Selector + StrategyGenerator 全链路），传入 ``dispatch_platform=平台`` 与
+    ``max_selected_nodes=该平台目标人数``。所有平台任务用线程池**并行**执行以加快
+    效率，每个平台使用独立的 ``output_dir`` / ``trace_dir`` 子目录互不覆盖。
+
+    每个平台产出的就是与单平台多人协同**完全同构** 的五维调度策略（含动作清单、
+    时间/频率/内容计划），最后由 :func:`build_multiplatform_output` 把各平台结果
+    **整合** 为「各平台结果 + 跨平台总览」，不另起一套选人逻辑。
+    """
     root = Path(workspace_root)
     stage_times: dict[str, float] = {}
     total_start = time.perf_counter()
+    platform_tag = "-".join(spec.platform_key for spec in platform_specs)
 
-    t0 = time.perf_counter()
-    client = llm_client
-    if client is None and use_llm:
-        client = OpenAICompatibleLLMClient.from_env_files(root)
-    stage_times["llm_client_init"] = time.perf_counter() - t0
-
-    t0 = time.perf_counter()
-    pipeline_payload = hot_event_to_pipeline_payload(
-        hot_event,
-        max_selected_nodes=max_selected_nodes,
+    common = dict(
+        workspace_root=root,
+        hot_event=hot_event,
+        profile_limit=profile_limit,
         risk_level=risk_level,
         campaign_window_hours=campaign_window_hours,
         max_frequency_per_day=max_frequency_per_day,
         allowed_platforms=allowed_platforms,
-    )
-    stage_times["hot_event_to_payload"] = time.perf_counter() - t0
-
-    # 多平台分发：每个 platform_spec 自己有 platform_key，召回层无法做单平台
-    # platform_aware（否则会把其它平台的优质节点误删）。这里关闭 dispatch_platform
-    # 让召回覆盖所有候选平台，再交给 PlatformDispatcher 各自过滤。
-    pipeline = StrategyPipeline(product_name="abc_reading")
-    artifacts = pipeline.run_with_artifacts(
-        workspace_root=root,
-        event_input=pipeline_payload,
-        profile_limit=profile_limit,
         use_llm=use_llm,
-        llm_client=client,
-        target_user_id=None,
         recall_size=recall_size,
         recall_mode=recall_mode,
     )
-    for key, value in artifacts.stage_times.items():
-        stage_times[key] = value
 
-    # 跨平台模式同样产出五维调度策略：先由 PlatformDispatcher 按平台独立选人，
-    # 再把选人结果翻译回策略节点，复用 build_eval_output 同一套节点规划与动作生成，
-    # 保证两种模式的动作口径、阶段口径与内容来源完全一致。
-    t0 = time.perf_counter()
-    dispatch_result = PlatformDispatcher().dispatch(
-        score_result=artifacts.score_result,
-        platform_specs=platform_specs,
-        campaign_window_hours=campaign_window_hours,
-    )
-    stage_times["platform_dispatch"] = time.perf_counter() - t0
+    # 并行执行：每个平台一条独立多人任务，线程池并发跑完整管线以加快效率。
+    platform_results: list[dict[str, Any] | None] = [None] * len(platform_specs)
+    errors: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=max(1, len(platform_specs))) as ex:
+        future_to_index: dict[Any, int] = {}
+        for i, spec in enumerate(platform_specs):
+            future_to_index[
+                ex.submit(
+                    _run_single_platform_evaluation,
+                    output_dir=Path(output_dir) / spec.platform_key,
+                    trace_dir=Path(trace_dir) / spec.platform_key,
+                    spec=spec,
+                    **common,
+                )
+            ] = i
+        for fut in as_completed(future_to_index):
+            i = future_to_index[fut]
+            spec = platform_specs[i]
+            try:
+                platform_results[i] = fut.result()
+            except Exception as exc:  # 单平台失败不拖垮整轮
+                errors[spec.platform_key] = str(exc)
+                platform_results[i] = {
+                    "平台": spec.platform_key,
+                    "目标人数": spec.requested_count,
+                    "选取人数": 0,
+                    "安全等级分布": {
+                        "合格": 0,
+                        "待人工复核": 0,
+                        "未通过资格筛选": 0,
+                    },
+                    "stage_times": {},
+                    "json_output_path": None,
+                    "五维调度策略": {},
+                    "error": str(exc),
+                }
 
     t0 = time.perf_counter()
-    output_payload, content_llm_meta = build_multiplatform_output(
+    output_payload = build_multiplatform_output(
         hot_event=hot_event,
-        strategy_result=artifacts.strategy_result,
-        dispatch_result=dispatch_result,
-        score_result=artifacts.score_result,
-        workspace_root=root,
-        # 文案生成不再调用大模型（见 CONTENT_LLM_ENABLED），改走规则占位文本。
-        use_llm=CONTENT_LLM_ENABLED,
-        llm_client=client,
+        platform_results=platform_results,
     )
-    stage_times["content_generation"] = time.perf_counter() - t0
+    if errors:
+        overview = output_payload.get("跨平台总览")
+        if isinstance(overview, dict):
+            overview["平台级错误"] = errors
+    stage_times["aggregate"] = time.perf_counter() - t0
 
     target_dir = Path(output_dir)
-    # 文件名同时带事件 ID、多平台标记与平台集合，
-    # 保证既不覆盖旧的 {event_id}_strategy_output.json，也不会让不同平台组合互相覆盖。
-    platform_tag = "-".join(
-        platform.platform_key for platform in dispatch_result.platforms
-    )
     output_path = (
         target_dir
-        / f"{artifacts.strategy_result.event.event_id}_multiplatform_{platform_tag}_strategy_output.json"
+        / f"{hot_event.get('event_id')}_multiplatform_{platform_tag}_strategy_output.json"
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
@@ -850,355 +913,104 @@ def _run_hot_event_multiplatform_evaluation(
         encoding="utf-8",
     )
 
-    t0 = time.perf_counter()
-    _write_pipeline_trace(
-        trace_dir=trace_dir,
-        hot_event=hot_event,
-        pipeline_payload=pipeline_payload,
-        artifacts=artifacts,
-        final_output=output_payload,
-        output_path=output_path,
-        # 跨平台模式现在也会为选中节点生成正文，因此同样写入内容生成诊断，
-        # 让 trace 能区分正文来自 LLM 还是规则兜底。
-        content_llm_meta=content_llm_meta,
-        run_label=f"multiplatform_{platform_tag}",
-    )
-    stage_times["write_trace"] = time.perf_counter() - t0
-
     stage_times["event_total"] = time.perf_counter() - total_start
     return output_path, output_payload, stage_times
+
+
+def _aggregate_safety(strategy: Any) -> dict[str, int]:
+    """从单平台五维调度策略里统计安全等级分布（合格 / 待人工复核 / 未通过资格筛选）。
+
+    单平台 ``五维调度策略.平台.数字人平台分发`` 每行带 ``安全等级`` 字段（取值为
+    ``safe`` / ``review_required`` / ``not_eligible`` 或其中文别名），这里统一归并
+    成三档中文计数，供跨平台总览汇总。
+    """
+    safety_agg = {"合格": 0, "待人工复核": 0, "未通过资格筛选": 0}
+    if not isinstance(strategy, dict):
+        return safety_agg
+    platform_dim = strategy.get("平台") or {}
+    rows = (
+        platform_dim.get("数字人平台分发")
+        if isinstance(platform_dim, dict)
+        else None
+    )
+    if not isinstance(rows, list):
+        return safety_agg
+    mapping = {
+        "safe": "合格",
+        "合格": "合格",
+        "review_required": "待人工复核",
+        "待人工复核": "待人工复核",
+        "not_eligible": "未通过资格筛选",
+        "未通过资格筛选": "未通过资格筛选",
+    }
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        tier = mapping.get(str(row.get("安全等级", "")), "合格")
+        safety_agg[tier] = safety_agg.get(tier, 0) + 1
+    return safety_agg
 
 
 def build_multiplatform_output(
     *,
     hot_event: dict[str, Any],
-    strategy_result: StrategyResult,
-    dispatch_result: MultiPlatformDispatchResult,
-    score_result: ScoreResult,
-    workspace_root: str | Path | None = None,
-    use_llm: bool = True,
-    llm_client: Any | None = None,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """构造跨平台分发的最终业务输出（与多人分发共用五维结构）。
-
-    输出契约与 :func:`build_eval_output` 一致：顶层为事件名称、输出版本标识与
-    ``五维调度策略``，五个维度（目标对象 / 时间 / 频率 / 平台 / 内容）的字段名
-    一一对应，因此前端可以复用同一套渲染组件。
-
-    差异只落在「平台」维度：额外输出 ``跨平台总览`` 与 ``各平台方案``，把每个平台
-    独立选人的人数、缺口、安全等级、内容计划与时间计划集中到一处。
-
-    节点级内容与多人分发同源：``PlatformDispatcher`` 选出的数字人先按
-    ``source_role_hint`` 翻译回策略角色（见 :mod:`selector` 的映射表），再由
-    ``StrategyGenerator`` 补齐阶段/频率/内容风格，最后复用同一个动作生成器产出
-    动作清单，避免两种模式各写一套而慢慢漂移。
-    """
-
-    selected_nodes = _selected_nodes_from_dispatch(
-        dispatch_result=dispatch_result,
-        score_result=score_result,
-        strategy_result=strategy_result,
-    )
-    selected_ids = [node.user_id for node in selected_nodes]
-    target = str(
-        hot_event.get("target")
-        or strategy_result.event.target_goal
-        or "扩大热点信息触达并引导理性讨论"
-    ).strip()
-    variants = _normalize_variants(hot_event.get("opinion_variants", []))
-
-    # LLM 只认 strategy_result.selected_nodes；跨平台选的人与整体选人不同，因此传
-    # 一份"选中节点已替换为平台选人结果"的副本，其余策略上下文保持原样。
-    llm_strategy_result = strategy_result.model_copy(
-        update={"selected_nodes": selected_nodes}
-    )
-    llm_overrides, content_llm_meta = _build_llm_node_texts(
-        hot_event=hot_event,
-        strategy_result=llm_strategy_result,
-        platform="、".join(item.display_name for item in dispatch_result.platforms)
-        or dispatch_result.dispatch_mode,
-        target=target,
-        workspace_root=workspace_root,
-        use_llm=use_llm,
-        llm_client=llm_client,
-        platform_for=_dispatch_platform_of_node,
-    )
-
-    # 协同对象只在**同一平台内**寻找：各平台独立排期执行，跨平台挂接动作既不
-    # 符合这一前提，也会让动作指向另一个平台的帖子。
-    peers_by_platform: dict[str, list[StrategyNodePlan]] = {}
-    for node in selected_nodes:
-        peers_by_platform.setdefault(_dispatch_platform_of_node(node), []).append(node)
-
-    node_outputs, post_refs, _ = _build_node_outputs(
-        hot_event=hot_event,
-        strategy_result=strategy_result,
-        selected_nodes=selected_nodes,
-        target=target,
-        variants=variants,
-        llm_overrides=llm_overrides,
-        platform_for=_dispatch_platform_of_node,
-        peer_nodes_for=lambda node: peers_by_platform.get(
-            _dispatch_platform_of_node(node), [node]
-        ),
-    )
-
-    # 节点角色以 rebalance 后的 selected_role 为准：跨平台选人时 source_role_hint
-    # 来自 PlatformDispatcher._rank_candidates，不保证每平台都有 core_publish_node。
-    # _selected_nodes_from_dispatch 已经按平台做过角色再平衡（见
-    # rebalance_selected_roles），这里输出的"节点角色"必须跟动作清单里实际使用的
-    # 角色保持一致，避免 UI 看到 amplification 但动作像 core 的割裂感。
-    selected_node_by_id = {node.user_id: node for node in selected_nodes}
-    platform_item_fields = {
-        item.user_id: {
-            "平台角色": item.platform_role,
-            "节点角色": selected_node_by_id[item.user_id].selected_role,
-            "选取名次": item.selection_rank,
-            "安全等级": item.safety_tier,
-            "平台适配分": item.platform_fit_score,
-            "平台调度分": item.platform_dispatch_score,
-        }
-        for platform_result in dispatch_result.platforms
-        for item in platform_result.selected_nodes
-    }
-
-    five_dimension_strategy = _build_five_dimension_strategy(
-        strategy_result=strategy_result,
-        selected_nodes=selected_nodes,
-        selected_ids=selected_ids,
-        platform=dispatch_result.dispatch_mode,
-        target=target,
-        post_refs=post_refs,
-        node_outputs=node_outputs,
-        platform_item_fields=platform_item_fields,
-        platform_extra={
-            "跨平台总览": _build_cross_platform_overview(dispatch_result),
-            "各平台方案": _build_platform_schemes(dispatch_result),
-        },
-    )
-    five_dimension_strategy["内容"]["内容生成诊断"] = _compact_content_llm_meta(
-        content_llm_meta
-    )
-
-    payload = {
-        "事件名称": str(
-            hot_event.get("event_title") or strategy_result.event.event_title
-        ),
-        "输出格式版本": MULTIPLATFORM_OUTPUT_FORMAT_VERSION,
-        FIVE_DIMENSION_STRATEGY_KEY: five_dimension_strategy,
-    }
-    return payload, content_llm_meta
-
-
-def _selected_nodes_from_dispatch(
-    *,
-    dispatch_result: MultiPlatformDispatchResult,
-    score_result: ScoreResult,
-    strategy_result: StrategyResult,
-) -> list[StrategyNodePlan]:
-    """把各平台的选人结果翻译成多人分发使用的 ``StrategyNodePlan``。
-
-    ``PlatformNodeAssignment`` 只携带排序与安全字段，缺少行动级字段
-    （阶段 / 频率 / 内容风格）。这里按 ``source_role_hint`` 恢复角色与阶段，再交给
-    ``StrategyGenerator`` 用**同一个策略上下文**补齐其余字段，使跨平台输出的动作
-    清单与多人分发逐字段同源，而不是各推一套。
-
-    按平台分别做角色再平衡（``rebalance_selected_roles``），保证每个平台至少有一
-    个 ``core_publish_node``。否则下游 ``_coordination_target_id`` /
-    ``_interaction_target`` 找不到协同目标，整张动作清单会退化成"自发自评"——
-    多人分发的 ``Selector`` 路径自带这个再平衡，跨平台分发的
-    ``PlatformDispatcher`` 路径没有，这里手动补齐。
-    """
-
-    node_score_by_id = {node.user_id: node for node in score_result.node_scores}
-    generator = StrategyGenerator()
-    plans: list[StrategyNodePlan] = []
-    for platform_result in dispatch_result.platforms:
-        # Step 1：把该平台内选中的 assignment 转成 SelectedNode，保留 source_role_hint
-        # 推导出的初始 selected_role。
-        platform_selections: list[SelectedNode] = []
-        for assignment in platform_result.selected_nodes:
-            base = node_score_by_id.get(assignment.user_id)
-            if base is None:
-                # PlatformDispatcher 只从 score_result 的候选池里选人，正常不会发生；
-                # 显式报错优于静默产出一个缺画像、缺策略依据的节点。
-                raise ValueError(
-                    f"跨平台调度结果中的数字人 {assignment.user_id} 不在本次评分结果内，"
-                    "无法复用多人分发的节点规划逻辑。"
-                )
-            role_hint = assignment.source_role_hint or base.role_hint
-            platform_selections.append(
-                SelectedNode(
-                    **base.model_dump(),
-                    selection_rank=assignment.selection_rank,
-                    selected_role=ROLE_HINT_TO_SELECTED_ROLE.get(
-                        role_hint, DEFAULT_SELECTED_ROLE
-                    ),
-                    dispatch_stage=ROLE_HINT_TO_DISPATCH_STAGE.get(
-                        role_hint, DEFAULT_DISPATCH_STAGE
-                    ),
-                    dispatch_priority=PRIORITY_TIER_TO_DISPATCH_PRIORITY.get(
-                        str(getattr(base, "priority_tier", "") or ""), "p3"
-                    ),
-                    selection_bucket="primary",
-                )
-            )
-        # Step 2：per-platform 角色再平衡。多人分发走的是
-        # ``Selector._rebalance_selected_roles``，跨平台分发走的是
-        # ``PlatformDispatcher``，没有内置这个保障；这里手动补齐，避免
-        # amplification/support 全部聚集在同一平台导致动作生成阶段全部"自指"。
-        rebalanced_selections = rebalance_selected_roles(platform_selections)
-        # Step 3：由 ``StrategyGenerator`` 用同一套策略上下文补齐阶段/频率/内容风格。
-        for selected_node in rebalanced_selections:
-            plans.append(
-                generator.build_node_plan_from_strategy(
-                    node=selected_node,
-                    strategy=strategy_result.strategy,
-                    bucket="primary",
-                )
-            )
-    return plans
-
-
-def _dispatch_platform_of_node(node: StrategyNodePlan) -> str:
-    """输出用的平台口径：统一取数据集写法（如 ``facebook_simulated``）。
-
-    与 :func:`build_eval_output` 相同，避免同一份 JSON 里同时出现
-    ``facebook`` 与 ``facebook_simulated`` 两套平台写法。
-    """
-
-    platform = node.platform or ""
-    if is_valid_dataset_platform(platform):
-        return dataset_platform_value(platform)
-    return platform
-
-
-def _safety_tier_distribution(tiers: Any) -> dict[str, int]:
-    """把安全层级计数渲染成中文键，与五维调度策略的其余字段保持同一语言。"""
-
-    return {
-        "合格": int(getattr(tiers, "safe", 0)),
-        "待人工复核": int(getattr(tiers, "review_required", 0)),
-        "未通过资格筛选": int(getattr(tiers, "not_eligible", 0)),
-    }
-
-
-def _build_cross_platform_overview(
-    dispatch_result: MultiPlatformDispatchResult,
+    platform_results: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """跨平台级汇总：人数、缺口、安全等级与跨平台告警。"""
+    """把逐平台复用的多人协同结果整合为多平台分发最终输出。
 
-    # PlatformDispatcher 会把每平台告警加 ``[平台]`` 前缀后聚合到顶层；不带前缀的
-    # 才是真正的跨平台告警（合格缺口、重复数字人等），据此区分避免重复展示。
-    cross_platform_warnings = [
-        str(warning)
-        for warning in dispatch_result.warnings
-        if not str(warning).startswith("[")
-    ]
-    return {
-        "调度模式": dispatch_result.dispatch_mode,
-        "活动窗口小时": dispatch_result.campaign_window_hours,
-        "平台数": len(dispatch_result.platforms),
-        "目标人数合计": dispatch_result.total_requested_count,
-        "选取人数合计": dispatch_result.total_selected_count,
-        "去重数字人数": dispatch_result.unique_user_count,
-        "合格缺口合计": dispatch_result.total_safe_shortfall_count,
-        "安全等级分布": _safety_tier_distribution(
-            dispatch_result.total_selected_safety_tiers
-        ),
-        "跨平台重复数字人": list(dispatch_result.overlapping_user_ids),
-        "跨平台提示": cross_platform_warnings,
+    每个 ``platform_results[i]`` 已经是一次完整多人协同产出的五维调度策略
+    （与单平台模式**完全同构**）。这里只做「整合」，不做新的选人逻辑：
+
+    * ``各平台结果`` 原样保留每个平台的五维策略，前端据此**复用多人协同的渲染组件**
+      逐个平台呈现，保证「各个平台与单平台完全一样」；
+    * ``跨平台总览`` 对各平台的人数、安全等级、重复数字人做汇总，作为总览呈现。
+    """
+    all_selected: list[str] = []
+    safety_agg = {"合格": 0, "待人工复核": 0, "未通过资格筛选": 0}
+    overlaps: set[str] = set()
+    prev_ids: set[str] | None = None
+
+    for pr in platform_results:
+        ids = [
+            str(uid)
+            for uid in (
+                pr.get("五维调度策略", {})
+                .get("目标对象", {})
+                .get("选取数字人id组", []) or []
+            )
+        ]
+        all_selected.extend(ids)
+        sd = pr.get("安全等级分布", {}) or {}
+        safety_agg["合格"] += int(sd.get("合格", 0))
+        safety_agg["待人工复核"] += int(sd.get("待人工复核", 0))
+        safety_agg["未通过资格筛选"] += int(sd.get("未通过资格筛选", 0))
+        id_set = set(ids)
+        if prev_ids is not None:
+            overlaps |= prev_ids & id_set
+        prev_ids = id_set
+
+    total_requested = sum(int(pr.get("目标人数", 0)) for pr in platform_results)
+    total_selected = sum(int(pr.get("选取人数", 0)) for pr in platform_results)
+
+    overview = {
+        "调度模式": "cross_platform",
+        "平台数": len(platform_results),
+        "目标人数合计": total_requested,
+        "选取人数合计": total_selected,
+        "去重数字人数": len(set(all_selected)),
+        "合格缺口合计": max(0, total_requested - total_selected),
+        "安全等级分布": safety_agg,
+        "跨平台重复数字人": sorted(overlaps),
         "内容草案说明": MULTIPLATFORM_DRAFT_NOTE,
         "结果范围说明": MULTIPLATFORM_SCOPE_NOTE,
     }
 
-
-def _build_platform_schemes(
-    dispatch_result: MultiPlatformDispatchResult,
-) -> list[dict[str, Any]]:
-    """逐平台方案：人数与安全等级、内容计划、时间计划与平台级提示。"""
-
-    schemes: list[dict[str, Any]] = []
-    for platform_result in dispatch_result.platforms:
-        content_plan = platform_result.content_plan
-        time_plan = platform_result.time_plan
-        schemes.append(
-            {
-                "平台": platform_result.platform_key,
-                "平台名称": platform_result.display_name,
-                "目标人数": platform_result.requested_count,
-                "选取人数": platform_result.selected_count,
-                "人数缺口": platform_result.shortfall_count,
-                "合格缺口": platform_result.safe_shortfall_count,
-                "安全等级分布": _safety_tier_distribution(
-                    platform_result.selected_safety_tiers
-                ),
-                "活动窗口小时": time_plan.campaign_window_hours,
-                "选取数字人id组": [
-                    item.user_id for item in platform_result.selected_nodes
-                ],
-                "平台角色配置": list(platform_result.platform_roles),
-                # 逐节点保留完整的选人与安全依据：五维表里给的是精简概览，
-                # 这里是可追溯的明细，避免对齐结构时丢掉评分依据。
-                "选取节点明细": [
-                    {
-                        "数字人id": item.user_id,
-                        "数字人名称": item.user_name,
-                        "分发平台": item.platform,
-                        "选取名次": item.selection_rank,
-                        "平台角色": item.platform_role,
-                        "节点角色": ROLE_HINT_TO_SELECTED_ROLE.get(
-                            item.source_role_hint, DEFAULT_SELECTED_ROLE
-                        ),
-                        "原始角色提示": item.source_role_hint,
-                        "安全等级": item.safety_tier,
-                        "综合分": item.final_score,
-                        "主题匹配分": item.topic_match_score,
-                        "影响力分": item.influence_score,
-                        "扩散分": item.diffusion_score,
-                        "稳定分": item.stability_score,
-                        "活跃分": item.activity_score,
-                        "平台适配分": item.platform_fit_score,
-                        "平台调度分": item.platform_dispatch_score,
-                        "适配依据": list(item.fit_basis),
-                        "未声明输入": list(item.undeclared_inputs),
-                        "风险等级": item.risk_level,
-                        "资格通过": item.eligible,
-                        "人工复核": item.manual_review_required,
-                        "风险标记": list(item.risk_flags),
-                    }
-                    for item in platform_result.selected_nodes
-                ],
-                "内容形态": list(content_plan.content_modes),
-                "写作指引": [
-                    {
-                        "环节标识": section.section_key,
-                        "环节": section.label,
-                        "写作指引": section.guidance,
-                    }
-                    for section in content_plan.sections
-                ],
-                "内容护栏": list(content_plan.guardrails),
-                "时间阶段": [
-                    {
-                        "阶段标识": stage.stage_key,
-                        "阶段": stage.label,
-                        "时间窗": stage.window,
-                        "开始小时": stage.start_hour,
-                        "结束小时": stage.end_hour,
-                        "重点": stage.focus,
-                    }
-                    for stage in time_plan.stages
-                ],
-                "节奏建议": list(time_plan.cadence_notes),
-                "阶段说明": time_plan.stage_schedule_note,
-                "平台提示": list(platform_result.warnings),
-                "免责声明": platform_result.policy_disclaimer,
-                "适配限制": list(platform_result.fit_limitations),
-                "适配方法": platform_result.fit_method,
-            }
-        )
-    return schemes
+    return {
+        "事件名称": str(hot_event.get("event_title") or ""),
+        "输出格式版本": MULTIPLATFORM_OUTPUT_FORMAT_VERSION,
+        "各平台结果": platform_results,
+        "跨平台总览": overview,
+    }
 
 
 def build_eval_output(

@@ -59,18 +59,24 @@ export default function ConsoleRoute() {
   // 事件来源
   const [eventSource, setEventSource] = useState<EventSource>("user");
   useEffect(() => {
-    // 切源时清掉与上次系统事件/图像输入相关的局部态（避免 picker 残留高亮、
-    // 上一次的 File 对象继续生效），但不要清 run / detail / trace，否则
+    // 切源时清掉与上次系统事件/图像/文本输入相关的局部态（避免 picker 残留高亮、
+    // 上一次的 File 对象或文本继续生效），但不要清 run / detail / trace，否则
     // 正在跑的 run 也会被一并隐藏。
     setSelectedEventId("");
     setSystemEvent(null);
     setImageFile(null);
+    setUserText("");
   }, [eventSource]);
 
   // 用户事件表单状态
   const [form, setForm] = useState<EventForm>(eventToForm(FALLBACK_EVENT));
   const [rawJson, setRawJson] = useState<string>(JSON.stringify(FALLBACK_EVENT, null, 2));
   const [inputMode, setInputMode] = useState<"form" | "json">("form");
+
+  // 用户文本输入（multi_user / cross_platform 的"用户输入"模式下使用）：一段事件描述
+  // 文本，提交时发给后端 /api/runs/text 的 event_text 字段，由后端"事件解析"成结构化
+  // 事件；下游选人 / 策略 / 输出流程与系统事件完全一致。
+  const [userText, setUserText] = useState("");
 
   // 系统事件
   const [systemEvent, setSystemEvent] = useState<SystemEventSummary | null>(null);
@@ -110,14 +116,14 @@ export default function ConsoleRoute() {
       });
   }, []);
 
-  // 自动选第一条结果加载详情
+  // 自动选第一条结果加载详情；运行完成（state 变化）或切换 history 时都会补加载，
+  // 避免「run 有结果但 detail 一直为空」导致面板只显示「选择一个结果查看详情」。
   useEffect(() => {
-    if (run?.results?.length && !selectedEventId) {
-      const first = run.results[0];
-      setSelectedEventId(first.event_id);
-      void loadDetail(run.run_id, first.event_id);
-    }
-  }, [run?.results, run?.run_id, selectedEventId]);
+    if (!run?.run_id || !run.results?.length) return;
+    const target = selectedEventId || run.results[0].event_id;
+    if (!selectedEventId) setSelectedEventId(target);
+    void loadDetail(run.run_id, target);
+  }, [run?.run_id, run?.state, selectedEventId]);
 
   const isRunning = run?.state === "queued" || run?.state === "running";
 
@@ -206,6 +212,18 @@ export default function ConsoleRoute() {
       }
       return runImageEvent(imageFile, options);
     }
+    // 多人协同 / 跨平台 + 用户输入：事件以"一段文本"提交，由后端事件解析成结构化事件；
+    // 下游选人 / 策略 / 输出流程与系统事件完全一致（只改变事件解析的方式）。
+    if (
+      eventSource === "user" &&
+      (dispatchMode === "multi_user" || dispatchMode === "cross_platform")
+    ) {
+      const text = userText.trim();
+      if (!text) {
+        throw new Error("请输入一段事件描述文本。");
+      }
+      return postJson<RunStatus>("/api/runs/text", { event_text: text, options });
+    }
     if (!event) {
       throw new Error("请先在上方选择或填写事件。");
     }
@@ -274,17 +292,20 @@ export default function ConsoleRoute() {
     setLoadingDetail(true);
     setTrace(null);
     try {
-      const [detailPayload, tracePayload] = await Promise.all([
-        fetchJson<Record<string, unknown>>(`/api/runs/${runId}/results/${eventId}`),
-        fetchJson<Record<string, unknown>>(`/api/runs/${runId}/traces/${eventId}`),
-      ]);
+      const detailPayload = await fetchJson<Record<string, unknown>>(
+        `/api/runs/${runId}/results/${eventId}`,
+      );
       setDetail(detailPayload);
-      setTrace(tracePayload);
     } catch (err) {
       setNotice(errorMessage(err));
     } finally {
       setLoadingDetail(false);
     }
+    // trace 独立加载：跨平台模式的 trace 按平台分目录存于顶层之外，
+    // 顶层 traces/{event_id} 会 404；此处失败仅置空 trace，不影响结果展示。
+    fetchJson<Record<string, unknown>>(`/api/runs/${runId}/traces/${eventId}`)
+      .then(setTrace)
+      .catch(() => setTrace(null));
   }
 
   useEffect(() => {
@@ -398,14 +419,33 @@ export default function ConsoleRoute() {
               </div>
             </div>
             {eventSource === "user" ? (
-              <UserEventForm
-                form={form}
-                updateForm={updateForm}
-                rawJson={rawJson}
-                setRawJson={setRawJson}
-                inputMode={inputMode}
-                onInputModeChange={setInputMode}
-              />
+              dispatchMode === "single_target" ? (
+                <UserEventForm
+                  form={form}
+                  updateForm={updateForm}
+                  rawJson={rawJson}
+                  setRawJson={setRawJson}
+                  inputMode={inputMode}
+                  onInputModeChange={setInputMode}
+                />
+              ) : (
+                <div className="event-input">
+                  <label className="json-editor">
+                    事件描述（输入一段文本，系统自动解析为事件）
+                    <textarea
+                      value={userText}
+                      rows={12}
+                      onChange={(event) => setUserText(event.target.value)}
+                      placeholder="例如：某地突降暴雨引发城市内涝，多个路段积水严重，市民出行受阻，网上出现多种声音……"
+                      spellCheck={false}
+                    />
+                  </label>
+                  <p className="form-hint">
+                    与系统事件的区别仅在于事件由文本解析得到，其余分发逻辑（选人 / 策略 /
+                    输出）完全一致。
+                  </p>
+                </div>
+              )
             ) : eventSource === "system" ? (
               <SystemEventPicker
                 selectedEventId={systemEvent?.event_id ?? ""}

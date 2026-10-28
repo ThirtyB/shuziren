@@ -279,15 +279,20 @@ class FeatureBuilder:
             made = int(getattr(target_ga, "made_interaction_count", 0)) if target_ga else 0
             followers = int(p.user_followers)
             friends = int(p.user_friends)
-            kw_hits = sum(
-                1
-                for k in keywords
-                if k
-                and (
-                    k in (p.user_description or "")
-                    or any(k in i for i in p.user_interests)
-                )
-            )
+            # 预拼接一次，避免对每个关键词都重新遍历 interests 列表；单 token 关键词
+            # 下 ``k in interests_blob`` 与原 ``any(k in i for i in interests)`` 完全等价。
+            desc_blob = p.user_description or ""
+            interests_blob = " ".join(p.user_interests)
+            kw_hits = 0
+            for k in keywords:
+                if not k:
+                    continue
+                if " " in k:
+                    # 极少数多词关键词：退回逐条 interests 判定，与原逻辑完全一致。
+                    if k in desc_blob or any(k in i for i in p.user_interests):
+                        kw_hits += 1
+                elif k in desc_blob or k in interests_blob:
+                    kw_hits += 1
             is_source = uid in source_set
             # role_hint == "interaction_response" 的代理：is_source 或 高活动度
             is_interaction_like = is_source or (received + made) >= 50
