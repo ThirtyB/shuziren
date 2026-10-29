@@ -40,8 +40,7 @@ export function CrossPlatformScenario(props: SharedScenarioProps) {
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
-    // 注意：``eventPayload === null`` 是合法的——``eventSource === "image"`` 时
-    // 由 ``props.submit`` 直接走 ``/api/runs/image`` + FormData，不需要事件 payload。
+    // ``eventPayload`` 由父组件统一分流校验（文字/图片/系统事件），这里只校验本场景参数。
     const cleaned: PlatformSpecPayload[] = specs
       .map((item) => ({ ...item, requested_count: Number(item.requested_count) || 0 }))
       .filter((item) => item.requested_count > 0);

@@ -375,3 +375,86 @@ def iter_text_previews(
         if index >= limit:
             break
         yield user_id, build_node_text(profile)
+
+
+class SemanticClassifier:
+    """用预训练语义编码器做「纯语义相似度」分类。
+
+    不再依赖关键词字典的「命中数」判定类别，而是把每个候选类别用一段锚文本
+    （anchor）表示，编码成向量并缓存；解析时把待分类文本也编码，与各类锚向量
+    逐个算余弦相似度，取最高者。语义空间由同一个本地编码器提供（TF-IDF+SVD 或
+    BGE），与选人/打分用的是同一套表示，因此分类与下游匹配口径一致。
+
+    编码器不可用时 :meth:`build` 返回 ``None``，调用方据此退化为默认类别。
+    """
+
+    def __init__(self, encoder: Any, anchors: dict[str, str]) -> None:
+        self.labels: list[str] = list(anchors.keys())
+        vectors = [
+            np.asarray(encoder.encode(text), dtype=np.float32)
+            for text in anchors.values()
+        ]
+        if vectors:
+            self._matrix = np.stack(vectors, axis=0)  # (n, dim)，已 L2 归一化
+        else:
+            self._matrix = np.zeros((0, 1), dtype=np.float32)
+        self._encoder = encoder
+
+    @classmethod
+    def build(cls, encoder: Any, anchors: dict[str, str]) -> "SemanticClassifier | None":
+        """构建分类器；``encoder`` 为 ``None`` 或编码失败时返回 ``None``。"""
+
+        if encoder is None:
+            return None
+        try:
+            return cls(encoder, anchors)
+        except Exception:  # noqa: BLE001 - 编码失败不应中断事件解析
+            return None
+
+    def classify(
+        self,
+        text: str,
+        default_label: str | None = None,
+        margin: float = 0.0,
+    ) -> tuple[str, float]:
+        """返回类别标签与相似度。
+
+        ``default_label`` 为兜底类别（如 ``general``）。给定时，只有当某个**非兜底**
+        类别的相似度明显高于兜底类别（超出 ``margin``）才选它，否则回落到兜底类别——
+        这样在语义上与「无明确命中则归为通用」等价，且对编码器后端（BGE/SVD）都稳健，
+        不依赖绝对相似度的阈值。
+        """
+
+        if self._matrix.shape[0] == 0:
+            raise ValueError("分类器未包含任何锚类别")
+        query = np.asarray(self._encoder.encode(text), dtype=np.float32)
+        sims = self._matrix @ query  # 余弦（点积，因均已 L2 归一化）
+        if default_label is None or default_label not in self.labels:
+            idx = int(np.argmax(sims))
+            return self.labels[idx], float(sims[idx])
+
+        default_idx = self.labels.index(default_label)
+        default_sim = float(sims[default_idx])
+        best_idx = -1
+        best_sim = default_sim + margin
+        for i, label in enumerate(self.labels):
+            if label == default_label:
+                continue
+            if sims[i] > best_sim:
+                best_sim = float(sims[i])
+                best_idx = i
+        if best_idx < 0:
+            return default_label, default_sim
+        return self.labels[best_idx], best_sim
+
+    def rank(self, text: str, k: int | None = None) -> list[tuple[str, float]]:
+        """返回按相似度降序排列的 ``(label, score)`` 列表，可选取前 ``k`` 个。"""
+
+        if self._matrix.shape[0] == 0:
+            raise ValueError("分类器未包含任何锚类别")
+        query = np.asarray(self._encoder.encode(text), dtype=np.float32)
+        sims = self._matrix @ query
+        order = np.argsort(-sims)
+        if k is not None:
+            order = order[:k]
+        return [(self.labels[i], float(sims[i])) for i in order]

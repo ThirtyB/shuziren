@@ -95,23 +95,26 @@ export async function deleteRun(runId: string): Promise<void> {
 }
 
 /**
- * 多模态图像事件输入：把图片上传到 ``/api/runs/image``，由后端**本地 OCR**
- * （RapidOCR）读取图片上的文字，再用规则提取出 ``event_title /
- * event_summary / domain / keywords / target / opinion_variants``，再走
- * 与文本事件完全相同的策略生成管线。全程不调用大模型。
+ * 用户输入（文字必填 + 图片可选）：把 ``event_text`` 与可选的图片一起上传到
+ * ``/api/runs/text-image``。后端对图片做**本地 OCR**（RapidOCR）读出文字，
+ * 再把 OCR 文字与用户输入文字融合成一段事件描述，交给与纯文本完全相同的规则
+ * 事件解析链路。全程不调用大模型；下游选人 / 策略 / 输出与系统事件完全一致。
  *
- * 图片里读不出文字时后端返回 ``method="unrecognized"`` 的低置信度结果
- * （而非编造事件内容），``warnings`` 会带 ``ocr_*`` 前缀说明原因。前端这边
- * 只负责提交文件；识别结果（match_score / fallback_used）由详情面板展示。
+ * 图片为空时后端退化为纯文本事件；图片里读不出文字时后端只保留用户输入文字，
+ * 不会编造内容。
  */
-export async function runImageEvent(
-  image: File,
+export async function runTextImageEvent(
+  eventText: string,
+  image: File | null,
   options: import("../types").RunOptions,
 ): Promise<RunStatus> {
   const formData = new FormData();
-  formData.append("image", image);
+  formData.append("event_text", eventText);
+  if (image) {
+    formData.append("image", image);
+  }
   formData.append("options", JSON.stringify(options));
-  const response = await fetch("/api/runs/image", {
+  const response = await fetch("/api/runs/text-image", {
     method: "POST",
     body: formData,
   });

@@ -1047,17 +1047,31 @@ def build_eval_output(
         llm_client=llm_client,
     )
 
-    # 多人协同：按「首发期 → 互动期 → 扩散期 → 支持期」编排，动作只有
-    # 发帖 / 评论 / 点赞 / 转发 四种，文案一律从弹药库取最相关的一条。
-    node_outputs, post_refs, _ = _build_staged_node_outputs(
-        strategy_result=strategy_result,
-        selected_nodes=selected_nodes,
-        platform=output_platform,
-        hot_event=hot_event,
-        variants=variants,
-        llm_overrides=llm_overrides,
-        workspace_root=workspace_root,
-    )
+    selection_summary = strategy_result.selection_summary
+    if selection_summary.selection_mode == "targeted":
+        # 单人分发：唯一数字人作为主发布节点，按四时期做自运营闭环
+        # （首发期发布→互动期自赞→扩散期自转发→支持期自赞并再发承接帖）。
+        node_outputs, post_refs, _ = _build_single_user_node_outputs(
+            strategy_result=strategy_result,
+            selected_nodes=selected_nodes,
+            platform=output_platform,
+            hot_event=hot_event,
+            variants=variants,
+            llm_overrides=llm_overrides,
+            workspace_root=workspace_root,
+        )
+    else:
+        # 多人 / 跨平台协同：按「首发期 → 互动期 → 扩散期 → 支持期」编排，动作只有
+        # 发帖 / 评论 / 点赞 / 转发 四种，文案一律从弹药库取最相关的一条。
+        node_outputs, post_refs, _ = _build_staged_node_outputs(
+            strategy_result=strategy_result,
+            selected_nodes=selected_nodes,
+            platform=output_platform,
+            hot_event=hot_event,
+            variants=variants,
+            llm_overrides=llm_overrides,
+            workspace_root=workspace_root,
+        )
 
     five_dimension_strategy = _build_five_dimension_strategy(
         strategy_result=strategy_result,
@@ -1115,128 +1129,12 @@ def build_eval_output(
     return payload, content_llm_meta
 
 
-def _build_node_outputs(
-    *,
-    hot_event: dict[str, Any],
-    strategy_result: StrategyResult,
-    selected_nodes: list[StrategyNodePlan],
-    target: str,
-    variants: list[str],
-    llm_overrides: dict[str, dict[str, str]],
-    platform_for: Callable[[StrategyNodePlan], str],
-    peer_nodes_for: Callable[[StrategyNodePlan], list[StrategyNodePlan]] | None = None,
-) -> tuple[dict[str, dict[str, Any]], dict[str, str], dict[str, str]]:
-    """为每个选中节点生成正文与动作清单。
-
-    多人分发与跨平台分发共用这段组装逻辑，差异只由两个回调表达：
-
-    * ``platform_for``：节点执行落地的平台。多人分发是全局主平台，跨平台分发是
-      该数字人自己的平台。
-    * ``peer_nodes_for``：协同对象（``digital_human_coordination``）的候选范围。
-      多人分发是全部选中节点；跨平台分发只在同平台内寻找——各平台独立排期执行，
-      跨平台挂接动作既不成立，也会让动作指向另一个平台的帖子。
-
-    返回 ``(node_outputs, post_refs, publish_action_ids)``。
-    """
-
-    post_refs = {
-        node.user_id: f"P{index:03d}"
-        for index, node in enumerate(selected_nodes, start=1)
-    }
-    publish_action_ids = {
-        node.user_id: f"A{((index - 1) * 4) + 1:03d}"
-        for index, node in enumerate(selected_nodes, start=1)
-    }
-
-    node_outputs: dict[str, dict[str, Any]] = {}
-    for index, node in enumerate(selected_nodes, start=1):
-        peers = peer_nodes_for(node) if peer_nodes_for is not None else selected_nodes
-        peer_ids = [item.user_id for item in peers]
-        node_platform = platform_for(node)
-        fallback_content = _fallback_content_bundle(
-            hot_event=hot_event,
-            strategy_result=strategy_result,
-            node=node,
-            node_index=index,
-            target=target,
-            variants=variants,
-            selected_ids=peer_ids,
-        )
-        override_content = llm_overrides.get(node.user_id, {})
-        post_content = (
-            override_content.get("post_content") or fallback_content["post_content"]
-        )
-        audience_profile = (
-            override_content.get("audience_profile")
-            or fallback_content["audience_profile"]
-        )
-        interaction_focus = (
-            override_content.get("audience_interaction_strategy")
-            or fallback_content["audience_interaction_strategy"]
-        )
-        coordination_focus = (
-            override_content.get("cross_digital_human_strategy")
-            or fallback_content["cross_digital_human_strategy"]
-        )
-        topic_labels = _topic_labels(node, strategy_result)
-        role_bucket_ids = _role_bucket_ids(peers, node.user_id)
-        actions = _build_compact_action_plan(
-            node=node,
-            node_index=index,
-            platform=node_platform,
-            post_content=post_content,
-            topic_labels=topic_labels,
-            interaction_focus=interaction_focus,
-            coordination_focus=coordination_focus,
-            role_bucket_ids=role_bucket_ids,
-            post_refs=post_refs,
-            publish_action_ids=publish_action_ids,
-        )
-        coordination_action_ids = [
-            action["动作编号"]
-            for action in actions
-            if action.get("动作分组") == "digital_human_coordination"
-        ]
-
-        node_outputs[f"id{node.user_id}"] = {
-            "时间阶段": _stage_text(node),
-            "发帖频率": _frequency_text(node.frequency_per_day),
-            "发帖平台": node_platform,
-            "数字人人设": _persona_for_node(node=node, topic_labels=topic_labels),
-            "发帖内容": post_content,
-            "目标受众": {
-                "目标群体画像": audience_profile,
-                "目标群体标签": strategy_result.strategy.target_object,
-                "主题关键词": topic_labels,
-            },
-            "动作清单": actions,
-            "与其他数字人互动策略": {
-                "互动数字人id集合": [
-                    item for item in peer_ids if item != node.user_id
-                ],
-                "协同动作编号": coordination_action_ids,
-                "协同说明": coordination_focus,
-            },
-            "执行约束": {
-                "节点角色": node.selected_role,
-                "执行阶段": node.dispatch_stage,
-                "执行优先级": node.dispatch_priority,
-                "节点得分": round(node.final_score, 6),
-                "风险等级": node.risk_level,
-                "人工复核": node.manual_review_required,
-                "风险标签": node.risk_flags,
-            },
-        }
-    return node_outputs, post_refs, publish_action_ids
-
-
 # --------------------------------------------------------------------------- #
 # 多人协同（单平台）：按时期编排的动作生成
 # --------------------------------------------------------------------------- #
-# 与 ``_build_node_outputs`` 的两点本质差别：
-#   1) 动作类型收敛为四种 —— 发帖 / 评论 / 点赞 / 转发；
-#   2) 动作按**时期**组织，而不是"每个节点四个"：后一时期的评论、点赞、转发
-#      都通过「依赖动作」指向前一时期已经产生的动作，形成真正的传播链。
+# 动作类型收敛为四种 —— 发帖 / 评论 / 点赞 / 转发；
+# 动作按**时期**组织，而不是"每个节点四个"：后一时期的评论、点赞、转发
+# 都通过「依赖动作」指向前一时期已经产生的动作，形成真正的传播链。
 
 #: 四种允许的动作。
 ACTION_PUBLISH = ("publish_post", "发布主帖")
@@ -1768,6 +1666,203 @@ def _build_staged_node_outputs(
     return node_outputs, post_refs, publish_action_ids
 
 
+def _build_single_user_node_outputs(
+    *,
+    strategy_result: StrategyResult,
+    selected_nodes: list[StrategyNodePlan],
+    platform: str,
+    hot_event: dict[str, Any] | None = None,
+    variants: list[str] | None = None,
+    llm_overrides: dict[str, dict[str, str]] | None = None,
+    workspace_root: str | Path | None = None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, str], dict[str, str]]:
+    """单人分发：唯一数字人作为主发布节点，按四时期做自运营闭环。
+
+    编排（与多人协同共享同一套时期语义，输出结构完全一致，前端无需分支）：
+
+    * 首发期（第一个时期）：本人发布主帖（anchor_post）；
+    * 互动期：给自己的主帖点赞；
+    * 扩散期（第一个传播期）：转发自己的主帖；
+    * 支持期（第二个传播期 + 最后一个时期）：给自己的转发点赞，并再发一篇承接帖。
+
+    这样单人也形成「发布 → 互动 → 扩散 → 再发布承接」的完整链路。动作类型仍是
+    发帖 / 点赞 / 转发 三种，文案走与多人协同相同的弹药库 / 规则占位路径；图文
+    （图片）事件走同一条 OCR→文本→内容生成链路，因此与多人协同对图文的处理一致。
+    """
+
+    if not selected_nodes:
+        return {}, {}, {}
+    node = selected_nodes[0]
+    event_type = strategy_result.event.event_type
+    arsenal = ContentArsenal.load(workspace_root)
+    semantics = _arsenal_semantics(workspace_root, _arsenal_event_text(strategy_result))
+    # 弹药池只在这里打分一次；后面每次取文案都复用这份排序结果。
+    ammo_ranking = _build_ammo_ranking(arsenal, event_type=event_type, semantics=semantics)
+    ammo_min_score = ARSENAL_MIN_SCORE if semantics is not None else None
+    time_plan = strategy_result.strategy.time_plan
+
+    variant_pool = list(variants or [])
+    event_title = str(
+        (hot_event or {}).get("event_title") or strategy_result.event.event_title or ""
+    )
+    event_summary = str(
+        (hot_event or {}).get("event_summary") or strategy_result.event.event_description or ""
+    )
+
+    used_texts: set[str] = set()
+    counter = itertools.count(1)
+    actions: list[dict[str, Any]] = []
+
+    def ammo(count: int = 1) -> list[tuple[str, float]]:
+        return _pick_ammo_texts(
+            ammo_ranking,
+            count=count,
+            exclude=used_texts,
+            min_score=ammo_min_score,
+        )
+
+    def text_or_fallback(picked: str, node_index: int) -> str:
+        """文案优先级：弹药库 → LLM 生成 → 规则占位文本（与多人协同一致）。"""
+
+        if picked:
+            return picked
+        llm_text = str((llm_overrides or {}).get(node.user_id, {}).get("post_content") or "").strip()
+        if llm_text:
+            return llm_text
+        return _post_content_text(
+            node=node,
+            node_index=node_index,
+            event_title=event_title,
+            event_summary=event_summary,
+            variants=variant_pool,
+        )
+
+    def emit(
+        kind: tuple[str, str],
+        stage: str,
+        trigger: str,
+        target: dict[str, Any],
+        depends_on: list[str],
+        creates: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        seq = next(counter)
+        label = STAGE_LABELS.get(stage, stage)
+        action = _compact_action(
+            action_id=f"A{seq:03d}",
+            seq=seq,
+            actor_id=node.user_id,
+            action_group=label,
+            action_type=kind[0],
+            action_name=kind[1],
+            platform=platform,
+            stage=f"{label} {time_plan.get(stage, '')}".strip(),
+            trigger_condition=trigger,
+            target=target,
+            depends_on=list(depends_on),
+            creates=creates,
+            payload=payload,
+        )
+        actions.append(action)
+        return action
+
+    # ① 首发期（第一个时期）：本人发布主帖
+    p_text, p_score = ammo()[0]
+    p_text = text_or_fallback(p_text, 1)
+    p_ref = "P001"
+    pa = emit(
+        ACTION_PUBLISH,
+        "stage_1_launch",
+        "进入首发期后立即执行",
+        _publish_target(node=node, own_post_ref=p_ref, target_core_id=node.user_id, target_core_ref=p_ref),
+        [],
+        {"post_ref": p_ref, "post_type": "anchor_post"},
+        {"正文草案": p_text, "弹药语义分": round(p_score, 4)},
+    )
+
+    # ② 互动期：给自己的主帖点赞
+    emit(
+        ACTION_LIKE,
+        "stage_2_engage",
+        "本人主帖发布后执行",
+        _post_target(p_ref, node.user_id, "本人首发帖"),
+        [pa["动作编号"]],
+        {},
+        {"跳过原因": ""},
+    )
+
+    # ③ 扩散期（第一个传播期）：转发自己的主帖
+    r_text, r_score = ammo()[0]
+    r_ref = "R001"
+    ra = emit(
+        ACTION_REPOST,
+        "stage_3_amplify",
+        "进入扩散期后转发本人主帖",
+        _post_target(p_ref, node.user_id, "本人首发帖"),
+        [pa["动作编号"]],
+        {"post_ref": r_ref, "post_type": "repost"},
+        {
+            "转发文案": r_text,
+            "原文post_ref": p_ref,
+            "文案留空": not r_text,
+            "弹药语义分": round(r_score, 4),
+        },
+    )
+
+    # ④ 支持期（第二个传播期）：给自己的转发点赞；并再发一篇承接帖（最后一个时期）
+    emit(
+        ACTION_LIKE,
+        "stage_2_support",
+        "本人转发出现后执行",
+        _post_target(r_ref, node.user_id, "本人转发帖"),
+        [ra["动作编号"]],
+        {},
+        {"跳过原因": ""},
+    )
+    q_text, q_score = ammo()[0]
+    q_text = text_or_fallback(q_text, 2)
+    q_ref = "Q001"
+    emit(
+        ACTION_PUBLISH,
+        "stage_2_support",
+        "进入支持期后发布承接帖",
+        _publish_target(node=node, own_post_ref=q_ref, target_core_id=node.user_id, target_core_ref=q_ref),
+        [],
+        {"post_ref": q_ref, "post_type": "support_post"},
+        {"正文草案": q_text, "来源": "弹药库"},
+    )
+
+    node_outputs: dict[str, dict[str, Any]] = {}
+    own_ref = p_ref
+    node_outputs[f"id{node.user_id}"] = {
+        "时间阶段": "首发期 → 支持期（全程自运营）",
+        "发帖平台": platform,
+        "发帖内容": next(
+            (
+                action["执行参数"].get("正文草案") or action["执行参数"].get("转发文案", "")
+                for action in actions
+                if action["动作类型"] == "publish_post"
+            ),
+            "",
+        ),
+        "动作清单": actions,
+        "动作统计": _count_actions(actions),
+        "执行约束": {
+            "节点角色": node.selected_role,
+            "执行阶段": node.dispatch_stage,
+            "执行优先级": node.dispatch_priority,
+            "节点得分": round(node.final_score, 6),
+            "风险等级": node.risk_level,
+            "人工复核": node.manual_review_required,
+            "风险标签": node.risk_flags,
+        },
+        "post_ref": own_ref,
+    }
+    post_refs: dict[str, str] = {node.user_id: p_ref}
+    publish_action_ids: dict[str, str] = {node.user_id: pa["动作编号"]}
+    return node_outputs, post_refs, publish_action_ids
+
+
 #: 四个时期的先后顺序——后端与前端都按这个顺序排，不用各自猜。
 STAGE_ORDER = ("stage_1_launch", "stage_2_engage", "stage_3_amplify", "stage_2_support")
 
@@ -1895,7 +1990,7 @@ def _build_five_dimension_strategy(
         all_actions.extend(node_output.get("动作清单", []) or [])
     action_index = {a.get("动作编号"): a for a in all_actions}
 
-    # 活动窗口小时数：用于把动作数量换算成"条/小时"。优先取事件约束里的窗口，
+    # 活动窗口小时数：用于把动作数量换算成"条/天"。优先取事件约束里的窗口，
     # 取不到再退回默认的 24 小时，保证除零安全。
     window_hours = 24
     _evt = getattr(strategy_result, "event", None)
@@ -1945,19 +2040,20 @@ def _build_five_dimension_strategy(
         if action_stats:
             # 多人协同：频率不再是预置上限，而是动作编排完成后的实际统计。
             total_actions = int(action_stats.get("合计", 0) or 0)
-            per_hour = round(total_actions / window_hours, 3) if window_hours else 0
+            # 直接由「动作总数 / 活动窗口天数」反算条/天，避免先 round 到 per_hour 再
+            # ×24 带来的二次取整误差（窗口=1 天时条/天 应等于动作合计，为整数）。
+            per_day = round(total_actions * 24 / window_hours, 2) if window_hours else 0
             frequency_items.append(
                 {
                     "数字人编号": node_number[node.user_id],
                     "数字人id": node.user_id,
                     "动作统计": action_stats,
-                    "条每小时": per_hour,
+                    "条每天": per_day,
                 }
             )
         else:
-            # 单人模式：计划频率按"次/天"给出，换算成"条/小时"便于横向比较。
+            # 单人模式：计划频率按"条/天"给出，直接以"条/天"展示。
             freq_per_day = node.frequency_per_day or 0
-            per_hour = round(freq_per_day / 24, 3)
             frequency_items.append(
                 {
                     "数字人编号": node_number[node.user_id],
@@ -1966,7 +2062,7 @@ def _build_five_dimension_strategy(
                         "发帖频率", _frequency_text(node.frequency_per_day)
                     ),
                     "频率上限": _frequency_text(frequency_plan.global_cap_per_day),
-                    "条每小时": per_hour,
+                    "条每天": freq_per_day,
                 }
             )
         platform_item: dict[str, Any] = {
@@ -2166,178 +2262,6 @@ def _minimal_action(
     return result
 
 
-def _topic_labels(node: StrategyNodePlan, strategy_result: StrategyResult) -> list[str]:
-    labels: list[str] = []
-    for item in [
-        *node.matched_keywords,
-        *node.semantic_tags,
-        *strategy_result.event.extracted_keywords[:3],
-    ]:
-        text = str(item).strip()
-        if text and text not in labels:
-            labels.append(text)
-    return labels[:6]
-
-
-def _role_bucket_ids(
-    selected_nodes: list[StrategyNodePlan],
-    current_user_id: str,
-) -> dict[str, list[str]]:
-    role_map = {
-        "core_publish_node": [],
-        "interaction_response_node": [],
-        "amplification_node": [],
-        "support_node": [],
-    }
-    for node in selected_nodes:
-        if node.user_id == current_user_id:
-            continue
-        role_map.setdefault(node.selected_role, []).append(node.user_id)
-    return role_map
-
-
-def _build_compact_action_plan(
-    *,
-    node: StrategyNodePlan,
-    node_index: int,
-    platform: str,
-    post_content: str,
-    topic_labels: list[str],
-    interaction_focus: str,
-    coordination_focus: str,
-    role_bucket_ids: dict[str, list[str]],
-    post_refs: dict[str, str],
-    publish_action_ids: dict[str, str],
-) -> list[dict[str, Any]]:
-    own_post_ref = post_refs.get(node.user_id, f"P{node_index:03d}")
-    own_publish_action_id = publish_action_ids.get(node.user_id, f"A{((node_index - 1) * 4) + 1:03d}")
-    core_ids = role_bucket_ids.get("core_publish_node", [])
-    target_core_id = _first_other_id(core_ids, node.user_id) or (core_ids[0] if core_ids else node.user_id)
-    target_core_ref = post_refs.get(target_core_id, own_post_ref)
-    has_external_core = target_core_id != node.user_id
-    target_core_publish_action_id = publish_action_ids.get(target_core_id) if has_external_core else None
-    coordination_target_id = _coordination_target_id(node=node, role_bucket_ids=role_bucket_ids) or target_core_id
-    coordination_target_ref = post_refs.get(coordination_target_id, own_post_ref)
-    coordination_publish_action_id = publish_action_ids.get(coordination_target_id) if coordination_target_id != node.user_id else None
-    coordination_seq = ((node_index - 1) * 4) + 4
-    if (
-        coordination_publish_action_id
-        and _action_number(coordination_publish_action_id) >= coordination_seq
-    ):
-        coordination_target_id = node.user_id
-        coordination_target_ref = own_post_ref
-        coordination_publish_action_id = None
-    coordination_self_monitor = coordination_target_id == node.user_id
-    publish_depends_on = []
-    if has_external_core and node.selected_role != "core_publish_node" and target_core_publish_action_id:
-        publish_depends_on.append(target_core_publish_action_id)
-    publish_action_type = _publish_action_type(node.selected_role) if has_external_core else "publish_post"
-    publish_action_name = _publish_action_name(node.selected_role) if has_external_core else "发布主帖"
-    publish_post_type = _post_type_for_role(node.selected_role) if has_external_core else "anchor_post"
-
-    actions: list[dict[str, Any]] = [
-        _compact_action(
-            action_id=own_publish_action_id,
-            seq=((node_index - 1) * 4) + 1,
-            actor_id=node.user_id,
-            action_group="content_publish",
-            action_type=publish_action_type,
-            action_name=publish_action_name,
-            platform=platform,
-            stage=_stage_text(node),
-            trigger_condition="进入对应时间阶段后立即执行",
-            target=_publish_target(node=node, own_post_ref=own_post_ref, target_core_id=target_core_id, target_core_ref=target_core_ref),
-            depends_on=publish_depends_on,
-            creates={"post_ref": own_post_ref, "post_type": publish_post_type},
-            payload={
-                "正文草案": post_content,
-                "话题标签": topic_labels,
-                "内容风格": node.suggested_content_style,
-                "执行频次": _frequency_text(node.frequency_per_day),
-            },
-        ),
-        _compact_action(
-            action_id=f"A{((node_index - 1) * 4) + 2:03d}",
-            seq=((node_index - 1) * 4) + 2,
-            actor_id=node.user_id,
-            action_group="comment_monitoring",
-            action_type="monitor_comments",
-            action_name="监测评论",
-            platform=platform,
-            stage=_stage_text(node),
-            trigger_condition="帖子发布后持续监测评论区反馈",
-            target=_post_target(own_post_ref, node.user_id, "自身帖子"),
-            depends_on=[own_publish_action_id],
-            creates={},
-            payload={
-                "优先关键词": topic_labels[:4],
-                "关注类型": ["高频疑问", "事实补充", "明显误读"],
-            },
-        ),
-        _compact_action(
-            action_id=f"A{((node_index - 1) * 4) + 3:03d}",
-            seq=((node_index - 1) * 4) + 3,
-            actor_id=node.user_id,
-            action_group="audience_interaction",
-            action_type=_interaction_action_type(node.selected_role),
-            action_name=_interaction_action_name(node.selected_role),
-            platform=platform,
-            stage=_stage_text(node),
-            trigger_condition=_interaction_trigger(node.selected_role, own_publish_action_id, target_core_publish_action_id),
-            target=_interaction_target(
-                node=node,
-                own_post_ref=own_post_ref,
-                target_core_id=target_core_id,
-                target_core_ref=target_core_ref,
-            ),
-            depends_on=_unique_action_ids([own_publish_action_id, target_core_publish_action_id]),
-            creates={},
-            payload=_interaction_payload(
-                node=node,
-                interaction_focus=interaction_focus,
-                topic_labels=topic_labels,
-                target_core_id=target_core_id,
-                target_core_ref=target_core_ref,
-            ),
-        ),
-        _compact_action(
-            action_id=f"A{((node_index - 1) * 4) + 4:03d}",
-            seq=coordination_seq,
-            actor_id=node.user_id,
-            action_group="digital_human_coordination",
-            action_type="monitor_coordination" if coordination_self_monitor else _coordination_action_type(node.selected_role),
-            action_name="监测协同反馈" if coordination_self_monitor else _coordination_action_name(node.selected_role),
-            platform=platform,
-            stage=_stage_text(node),
-            trigger_condition=(
-                "自身帖子发布后，等待其它数字人挂接评论、点赞或转发"
-                if coordination_self_monitor
-                else _coordination_trigger(node.selected_role, coordination_publish_action_id)
-            ),
-            target=_coordination_target(
-                node=node,
-                own_post_ref=own_post_ref,
-                target_owner_id=coordination_target_id,
-                target_post_ref=coordination_target_ref,
-            ),
-            depends_on=_unique_action_ids([own_publish_action_id, coordination_publish_action_id]),
-            creates={},
-            payload={
-                "协同说明": coordination_focus,
-                "协同对象数字人id": [
-                    item for item in [coordination_target_id] if item and item != node.user_id
-                ],
-                "协同目标": (
-                    "等待后续节点挂接到当前帖子"
-                    if coordination_self_monitor
-                    else _coordination_goal(node.selected_role)
-                ),
-            },
-        ),
-    ]
-    return actions
-
-
 def _compact_action(
     *,
     action_id: str,
@@ -2380,28 +2304,6 @@ def _post_target(post_ref: str, owner_id: str, target_label: str) -> dict[str, A
     }
 
 
-def _first_other_id(candidates: list[str], current_user_id: str) -> str | None:
-    for user_id in candidates:
-        if user_id != current_user_id:
-            return user_id
-    return None
-
-
-def _unique_action_ids(action_ids: list[str | None]) -> list[str]:
-    result: list[str] = []
-    for action_id in action_ids:
-        if action_id and action_id not in result:
-            result.append(action_id)
-    return result
-
-
-def _action_number(action_id: str) -> int:
-    try:
-        return int(str(action_id).lstrip("A"))
-    except ValueError:
-        return 0
-
-
 def _persona_for_node(*, node: StrategyNodePlan, topic_labels: list[str]) -> str:
     topic_hint = "、".join(topic_labels[:2])
     suffix = f"（侧重：{topic_hint}）" if topic_hint else ""
@@ -2412,36 +2314,6 @@ def _persona_for_node(*, node: StrategyNodePlan, topic_labels: list[str]) -> str
         "support_node": "背景补充型说明账号",
     }
     return f"{mapping.get(node.selected_role, '通用协同型数字人')}{suffix}"
-
-
-def _publish_action_type(selected_role: str) -> str:
-    mapping = {
-        "core_publish_node": "publish_post",
-        "interaction_response_node": "publish_followup_post",
-        "amplification_node": "quote_repost",
-        "support_node": "publish_support_post",
-    }
-    return mapping.get(selected_role, "publish_post")
-
-
-def _publish_action_name(selected_role: str) -> str:
-    mapping = {
-        "core_publish_node": "发布主帖",
-        "interaction_response_node": "发布跟进帖",
-        "amplification_node": "转发并附评",
-        "support_node": "发布补充帖",
-    }
-    return mapping.get(selected_role, "发布帖子")
-
-
-def _post_type_for_role(selected_role: str) -> str:
-    mapping = {
-        "core_publish_node": "core_post",
-        "interaction_response_node": "followup_post",
-        "amplification_node": "amplification_post",
-        "support_node": "support_post",
-    }
-    return mapping.get(selected_role, "post")
 
 
 def _publish_target(
@@ -2458,156 +2330,6 @@ def _publish_target(
             "目标说明": "公共信息流首发",
         }
     return _post_target(target_core_ref, target_core_id, f"数字人 {target_core_id} 的主帖")
-
-
-def _interaction_action_type(selected_role: str) -> str:
-    mapping = {
-        "core_publish_node": "reply_comment",
-        "interaction_response_node": "reply_comment",
-        "amplification_node": "like_post",
-        "support_node": "reply_comment",
-    }
-    return mapping.get(selected_role, "reply_comment")
-
-
-def _interaction_action_name(selected_role: str) -> str:
-    mapping = {
-        "core_publish_node": "回复评论",
-        "interaction_response_node": "回复评论",
-        "amplification_node": "点赞帖子",
-        "support_node": "回复评论",
-    }
-    return mapping.get(selected_role, "回复评论")
-
-
-def _interaction_trigger(selected_role: str, own_publish_action_id: str, target_core_publish_action_id: str | None) -> str:
-    if selected_role == "core_publish_node":
-        return f"在 {own_publish_action_id} 发布后，出现高频提问或有效补充时执行"
-    if target_core_publish_action_id:
-        return f"在 {target_core_publish_action_id} 发布后进入互动窗口时执行"
-    return f"在 {own_publish_action_id} 发布后进入互动窗口时执行"
-
-
-def _interaction_target(
-    *,
-    node: StrategyNodePlan,
-    own_post_ref: str,
-    target_core_id: str,
-    target_core_ref: str,
-) -> dict[str, Any]:
-    if node.selected_role == "core_publish_node" or target_core_id == node.user_id:
-        return {
-            "目标类型": "post_comments",
-            "post_ref": own_post_ref,
-            "目标数字人id": node.user_id,
-            "目标说明": "自身主帖评论区",
-            "评论筛选": ["高频问题", "理性追问", "事实补充"],
-        }
-    if node.selected_role == "amplification_node":
-        return _post_target(target_core_ref, target_core_id, f"数字人 {target_core_id} 的主帖")
-    return _post_target(target_core_ref, target_core_id, f"数字人 {target_core_id} 的主帖")
-
-
-def _interaction_payload(
-    *,
-    node: StrategyNodePlan,
-    interaction_focus: str,
-    topic_labels: list[str],
-    target_core_id: str,
-    target_core_ref: str,
-) -> dict[str, Any]:
-    if node.selected_role == "core_publish_node" or target_core_id == node.user_id:
-        return {
-            "回复数量上限": 3,
-            "回复要点": topic_labels[:3],
-            "回复提示": interaction_focus,
-        }
-    if node.selected_role == "amplification_node":
-        return {
-            "点赞数量": 1,
-            "点赞对象": target_core_ref,
-            "点赞对象数字人id": target_core_id,
-            "协同目的": "为核心信息建立显式连接",
-        }
-    return {
-        "评论数量": 1,
-        "评论对象": target_core_ref,
-        "评论对象数字人id": target_core_id,
-        "评论目的": interaction_focus,
-    }
-
-
-def _coordination_action_type(selected_role: str) -> str:
-    mapping = {
-        "core_publish_node": "like_post",
-        "interaction_response_node": "comment_post",
-        "amplification_node": "like_post",
-        "support_node": "comment_post",
-    }
-    return mapping.get(selected_role, "comment_post")
-
-
-def _coordination_action_name(selected_role: str) -> str:
-    mapping = {
-        "core_publish_node": "点赞数字人帖子",
-        "interaction_response_node": "评论数字人帖子",
-        "amplification_node": "点赞数字人帖子",
-        "support_node": "评论数字人帖子",
-    }
-    return mapping.get(selected_role, "协同动作")
-
-
-def _coordination_target_id(
-    *,
-    node: StrategyNodePlan,
-    role_bucket_ids: dict[str, list[str]],
-) -> str | None:
-    if node.selected_role == "core_publish_node":
-        for role in ("interaction_response_node", "amplification_node", "support_node"):
-            target_id = _first_other_id(role_bucket_ids.get(role, []), node.user_id)
-            if target_id:
-                return target_id
-        return None
-    core_target = _first_other_id(role_bucket_ids.get("core_publish_node", []), node.user_id)
-    if core_target:
-        return core_target
-    for role in ("interaction_response_node", "support_node", "amplification_node"):
-        target_id = _first_other_id(role_bucket_ids.get(role, []), node.user_id)
-        if target_id:
-            return target_id
-    return None
-
-
-def _coordination_trigger(selected_role: str, target_core_publish_action_id: str | None) -> str:
-    if selected_role == "core_publish_node":
-        return "互动节点和扩散节点完成首轮动作后执行"
-    if target_core_publish_action_id:
-        return f"在 {target_core_publish_action_id} 执行后进入协同窗口时执行"
-    return "在核心帖发布后进入协同窗口时执行"
-
-
-def _coordination_target(
-    *,
-    node: StrategyNodePlan,
-    own_post_ref: str,
-    target_owner_id: str,
-    target_post_ref: str,
-) -> dict[str, Any]:
-    if target_owner_id == node.user_id:
-        return _post_target(own_post_ref, node.user_id, "自身帖子")
-    if node.selected_role == "core_publish_node":
-        return _post_target(target_post_ref, target_owner_id, f"数字人 {target_owner_id} 的协同帖")
-    return _post_target(target_post_ref, target_owner_id, f"数字人 {target_owner_id} 的主帖")
-
-
-def _coordination_goal(selected_role: str) -> str:
-    mapping = {
-        "core_publish_node": "保持首发节点和后续节点节奏一致",
-        "interaction_response_node": "承接核心节点并把讨论拉回主帖",
-        "amplification_node": "放大核心信息并保持统一口径",
-        "support_node": "补充背景并避免与其他节点重复",
-    }
-    return mapping.get(selected_role, "维持协同")
 
 
 def _build_platform_coordination(
@@ -3522,7 +3244,7 @@ def _stage_text(node: StrategyNodePlan) -> str:
 
 
 def _frequency_text(frequency_per_day: int) -> str:
-    return f"{frequency_per_day}/day"
+    return f"{frequency_per_day}条/天"
 
 
 def _post_content_text(

@@ -19,10 +19,17 @@ OCR 只负责"看见字"，不理解语义。把碎片文字重组成「标题 /
 
 速度
 ----
-RapidOCR（PP-OCR ONNX）在 CPU 上处理一张 1672×941 的截图约 3~5 秒，
-瓶颈是文本行数量而非图片尺寸 —— 每行都要过一次识别网络。缩放收益有限，
-但能把超大图（手机长截图）拉回可控范围。图片识别是一次性请求，Web 端走异步
-任务队列，这个耗时可以接受。
+RapidOCR（PP-OCR ONNX）在 CPU 上处理一张 1672×941 的截图约 3~5 秒（冷启动含模型
+加载时更高），瓶颈是文本行数量而非图片尺寸 —— 每行都要过一次识别网络。缩放收益
+有限，但能把超大图（手机长截图）拉回可控范围。
+
+已做的两个提速点：
+  * 关闭角度分类器（``use_cls=False``）：本系统只处理横排新闻截图，方向分类是多余的
+    逐行开销，关掉后单图稳定快约 0.1~0.2s，对横排文字精度无影响。
+  * Web 服务启动时预加载引擎（见 ``web_app._warmup_local_models``），把模型加载的
+    一次性成本从「首个图片请求」挪到「服务启动」，使首请求落回 ~4.5s、后续热路径
+    稳定在 2.5~3s。
+图片识别是一次性请求，Web 端走异步任务队列，这个耗时可以接受。
 """
 
 from __future__ import annotations
@@ -75,19 +82,54 @@ _TIME_PATTERN = re.compile(r"^\d{1,2}[:：]\d{2}([:：]\d{2})?$")
 _PURE_NUMBER = re.compile(r"^[\d\s.,%％+\-—/]+$")
 _PUNCT_ONLY = re.compile(r"^[\W_]+$", re.UNICODE)
 
-#: 领域词典。命中数最多的领域胜出；全不命中时回落 ``general``。
-#: 键与视觉识别原先产出的 domain 枚举保持一致，避免下游字段口径变化。
-DOMAIN_RULES: dict[str, tuple[str, ...]] = {
-    "military": ("军事", "战争", "护航", "军舰", "导弹", "冲突", "海域", "安全形势", "军演", "兵力"),
-    "technology": ("人工智能", "ai", "芯片", "算力", "算法", "大模型", "技术", "半导体", "生成式"),
-    "politics": ("政府", "治理", "监管", "政策", "法规", "法治", "协商", "磋商", "规则", "合规"),
-    "finance": ("金融", "银行", "利率", "股市", "汇率", "投资", "债券", "资本"),
-    "energy": ("能源", "石油", "油价", "天然气", "电力", "燃油", "煤炭", "新能源"),
-    "international_relations": ("国际", "多国", "跨境", "谈判", "关税", "外交", "全球", "协定"),
-    "climate": ("气候", "碳中和", "碳排放", "环保", "减排", "绿色能源"),
-    "cybersecurity": ("网络安全", "数据安全", "黑客", "攻击", "隐私", "加密", "泄露"),
-    "public_policy": ("公共政策", "民生", "医疗", "教育", "社保", "就业", "住房"),
+#: 领域锚文本（纯语义相似度）。
+#:
+#: 取代原先的关键词命中计数（``DOMAIN_RULES``）。每个领域用一段自然语言描述其语义
+#: 中心，解析时由 ``SemanticClassifier`` 把事件文本与各锚文本编码到同一语义空间，
+#: 取余弦相似度最高的领域；编码器不可用时回落 ``general``。键与视觉识别原先产出的
+#: domain 枚举保持一致，避免下游字段口径变化。
+DOMAIN_ANCHORS: dict[str, str] = {
+    "military": "军事、战争、护航、军舰、导弹、冲突、海域、安全形势、军演、兵力。",
+    "technology": "人工智能、AI、芯片、算力、算法、大模型、技术、半导体、生成式。",
+    "politics": "政府、治理、监管、政策、法规、法治、协商、磋商、规则、合规。",
+    "finance": "金融、银行、利率、股市、汇率、投资、债券、资本。",
+    "energy": "能源、石油、油价、天然气、电力、燃油、煤炭、新能源。",
+    "international_relations": "国际、多国、跨境、谈判、关税、外交、全球、协定。",
+    "climate": "气候、碳中和、碳排放、环保、减排、绿色能源。",
+    "cybersecurity": "网络安全、数据安全、黑客、攻击、隐私、加密、泄露。",
+    "public_policy": "公共政策、民生、医疗、教育、社保、就业、住房。",
+    # 兜底领域：事件文本在语义空间里最贴近它时，回落到通用领域。
+    "general": "一般性的新闻与公共话题，无法归入上述特定领域。",
 }
+
+#: 领域分类器懒加载缓存（进程内只构建一次）。
+_DOMAIN_CLASSIFIER: Any = None
+_DOMAIN_CLASSIFIER_READY = False
+
+
+def _get_domain_classifier(workspace_root: str | Path | None = None) -> Any:
+    """构建（并缓存）领域语义分类器；本地编码器不可用时返回 ``None``。"""
+
+    global _DOMAIN_CLASSIFIER, _DOMAIN_CLASSIFIER_READY
+    if _DOMAIN_CLASSIFIER_READY:
+        return _DOMAIN_CLASSIFIER
+
+    encoder = None
+    try:
+        from pathlib import Path as _P
+        from .local_models import load_local_models
+
+        root = workspace_root or _P(__file__).resolve().parents[2]
+        models = load_local_models(root)
+        encoder = models.encoder if models else None
+    except Exception:  # noqa: BLE001 - 取不到编码器不应中断解析
+        encoder = None
+
+    from .local_semantic import SemanticClassifier
+
+    _DOMAIN_CLASSIFIER = SemanticClassifier.build(encoder, DOMAIN_ANCHORS)
+    _DOMAIN_CLASSIFIER_READY = True
+    return _DOMAIN_CLASSIFIER
 
 
 @dataclass(slots=True)
@@ -121,6 +163,10 @@ def _load_engine() -> Any:
 
     RapidOCR 初始化会加载 3 个 ONNX 模型（检测/方向/识别），约 0.9s、几十 MB 内存，
     因此进程内只建一次。Web 服务是多线程的，用锁保护。
+
+    默认关闭角度分类器（``use_cls=False``）：本系统只处理横排新闻截图，方向分类是
+    多余的逐行开销；关掉后每个文本行少跑一次分类网络，单图识别稳定快约 0.1~0.2s，
+    对横排文字的识别精度无影响。
     """
 
     global _engine
@@ -130,8 +176,8 @@ def _load_engine() -> Any:
         if _engine is None:
             from rapidocr_onnxruntime import RapidOCR
 
-            _engine = RapidOCR()
-            logger.info("RapidOCR 引擎已加载")
+            _engine = RapidOCR(use_cls=False)
+            logger.info("RapidOCR 引擎已加载（use_cls=False）")
     return _engine
 
 
@@ -237,18 +283,19 @@ def is_noise(text: str) -> bool:
     return False
 
 
-def infer_domain(texts: Iterable[str]) -> str:
-    """按领域词典命中数推断，全不命中返回 ``general``。"""
+def infer_domain(texts: Iterable[str], workspace_root: str | Path | None = None) -> str:
+    """按语义相似度推断领域；本地编码器不可用时回落 ``general``。
 
-    joined = " ".join(texts).lower()
-    best_domain = "general"
-    best_hits = 0
-    for domain, keywords in DOMAIN_RULES.items():
-        hits = sum(1 for keyword in keywords if keyword in joined)
-        if hits > best_hits:
-            best_domain = domain
-            best_hits = hits
-    return best_domain
+    原先是关键词命中计数（``DOMAIN_RULES``），现改为 ``SemanticClassifier``：
+    把每个领域用一段锚文本表示，与事件文本在语义空间里取余弦相似度最高的领域。
+    """
+
+    joined = " ".join(texts)
+    clf = _get_domain_classifier(workspace_root)
+    if clf is None:
+        return "general"
+    label, _ = clf.classify(joined, default_label="general", margin=0.03)
+    return label
 
 
 def build_event_fields(texts: Sequence[str]) -> dict[str, Any]:

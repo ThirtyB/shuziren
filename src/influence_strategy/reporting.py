@@ -64,7 +64,7 @@ def render_strategy_markdown(strategy_result: StrategyResult) -> str:
                     node.selected_role,
                     node.platform or "-",
                     node.dispatch_stage,
-                    f"{node.frequency_per_day}/day",
+                    f"{node.frequency_per_day}条/天",
                     f"{node.final_score:.3f}",
                     node.risk_level,
                 ]

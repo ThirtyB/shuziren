@@ -42,12 +42,12 @@ GENERIC_STOPWORDS = {
     "影响",
 }
 
-#: 事件类型判定词典（时事政治领域）。
+#: 关键词词表（时事政治领域）。
 #:
-#: **维护注意**：``_keyword_score`` 的得分是 ``命中数 / 该类关键词总数``，
-#: 所以**单个类别的词不是越多越好**——分母随词数增长，堆成大杂烩反而更难胜出。
-#: 因此时政领域按事件库 118 个 domain 归并成 15 个细分类，每类控制在 14~18 词。
-#: 扩充时请沿用这个原则：宁可**新增细分类**，不要往一个类里无限堆词。
+#: **注意**：以下三套词表现在**只用于关键词提取**（``_extract_keywords``）与节点
+#: 兴趣标签构建（``scripts/build_political_domain_nodes.py``），**不再参与分类判定**。
+#: 事件类型 / 目标 / 受众的分类已改为纯语义相似度（见 ``EVENT_TYPE_ANCHORS`` 等），
+#: 由 ``SemanticClassifier`` 在解析时用本地编码器比对锚文本得到。
 EVENT_TYPE_RULES: dict[str, tuple[str, ...]] = {
     # military / defense_policy / defense_industry / security* / border_security /
     # peacekeeping / peace_process / regional_security
@@ -167,6 +167,50 @@ AUDIENCE_RULES: dict[str, tuple[str, ...]] = {
     "livelihood_public": ("民生", "市民", "居民", "公众", "社区", "消费者"),
 }
 
+#: 分类锚文本（纯语义相似度）。
+#:
+#: 取代原先的关键词命中计数。每个类别用一段自然语言描述其语义中心，解析时由
+#: ``SemanticClassifier`` 把事件文本与各锚文本编码到同一语义空间，取余弦相似度
+#: 最高的类别。锚文本刻意复用关键词词表里的核心术语，以让本地编码器（BGE 或
+#: TF-IDF+SVD）能在现有向量空间里给出有意义的近邻。
+EVENT_TYPE_ANCHORS: dict[str, str] = {
+    "military_conflict": "军事冲突、战争、导弹、核武器、核试验、军演、撤军、维和、边境与领空领海安全、战机航母无人机空袭、防务军费与武装力量。",
+    "international_relations": "外交关系、双边与多边峰会会谈、出访建交、国际组织与联合国安理会、盟友伙伴协议声明、谴责召见大使、地缘政治主权领土与断交。",
+    "macro_economy": "经济增长、衰退滞胀、通胀通缩物价、利率降息加息、央行货币政策、财政税收国债债务赤字、内需消费进出口。",
+    "financial_market": "股市债市、银行信贷保险、投资基金融资、上市破产、房地产房价楼市、理财证券股民。",
+    "tech_ai": "人工智能大模型、算法算力、芯片半导体光刻机、开源自动驾驶机器人、量子航天卫星火箭空间站、知识产权。",
+    "cyber_data_governance": "网络安全黑客、数据泄露漏洞勒索攻击、木马隐私个人信息、数据合规监管平台、反垄断与内容审核。",
+    "energy_resources": "能源原油油价、天然气煤炭石油、核电光伏风电新能源、储能电池稀土矿产、电力电价与限电。",
+    "climate_disaster": "气候变暖碳排放碳中和、碳市场减排、极端天气高温暴雨洪涝台风干旱、地震火山山火海啸灾害应急。",
+    "public_health": "疫情传染病流感、病毒疫苗核酸隔离、防控公共卫生、医疗医保药品药价集采医院。",
+    "politics_election": "选举大选投票选民、民调候选人与议会国会、政府内阁换届就职、弹劾罢免修宪公投、政党执政法案立法预算。",
+    "social_unrest": "抗议示威游行、罢工罢课骚乱暴乱、镇压戒严动荡、动乱政变暴动集会。",
+    "industry_supply_chain": "供应链物流航运、港口货运集装箱航线、空运航空航班、铁路高铁基建基础设施、制造业工厂产能订单产业链汽车。",
+    "agriculture_food": "农业粮食农产品、丰收减产耕地种业、养殖渔业粮价粮食安全、农村农民食品。",
+    "labor_demographics": "用工招工裁员失业、劳工工会社保养老金、人口生育老龄化、户籍移民难民。",
+    "social_livelihood": "教育学校学生教师考试高考、学费住房租房民生、治安犯罪诈骗事故、社区城市治理。",
+    # 兜底类别：事件文本在语义空间里最贴近它时，回落到通用影响力事件。
+    "general_influence_event": "一般性的社会热点与公共话题、产品与品牌传播、日常讨论与通用影响力事件。",
+}
+
+GOAL_ANCHORS: dict[str, str] = {
+    "engagement": "提升讨论度、互动率与用户参与，鼓励评论、交流、问答与社群活跃。",
+    "awareness": "扩大事件触达范围、建立基础认知、提升传播曝光与扩散覆盖。",
+    "response": "快速回应公众疑问、澄清误读、解释事实、稳定舆论节奏。",
+    "conversion": "引导目标人群完成后续行动，如报名、下载、注册、转化。",
+}
+
+AUDIENCE_ANCHORS: dict[str, str] = {
+    "policy_observer": "关注政策、政务、时政与公共事务、体制改革的观察者。",
+    "investor_finance": "关注投资、财经、股市、基金、理财、证券的投资者与股民。",
+    "industry_professional": "产业、行业、企业、职场与工商界从业者。",
+    "international_audience": "关注国际、海外、全球、跨境与外贸的涉外受众。",
+    "tech_audience": "科技、数码、互联网、开发者、程序员与极客群体。",
+    "security_strategy": "关注安全、战略、防务、军事、情报与国际安全的群体。",
+    "academic_expert": "专家、学者、研究人员、智库与分析师等学术群体。",
+    "livelihood_public": "关注民生、市民、居民、公众、社区与消费者的普通大众。",
+}
+
 #: 风险等级触发词。命中即抬高风险等级，进而收紧准入门槛、加大扣分系数、
 #: 压低发布频次。时政场景下的战争/制裁/骚乱等应判高风险，这是预期行为。
 HIGH_RISK_KEYWORDS = (
@@ -201,6 +245,10 @@ def _dedupe_preserve_order(values: list[str]) -> list[str]:
 class RuleBasedEventParser:
     def __init__(self, default_product_name: str = "abc_reading") -> None:
         self.default_product_name = default_product_name
+        # 语义分类器懒加载缓存：第一次解析时按 workspace_root 取本地编码器构建，
+        # 之后复用，避免每个事件都重新编码锚文本。
+        self._classifiers: dict[str, Any] = {}
+        self._classifiers_ready = False
 
     def parse(
         self,
@@ -211,7 +259,7 @@ class RuleBasedEventParser:
         llm_client: Any | None = None,
     ) -> ParsedEvent:
         raw_event = self._normalize_payload(payload)
-        parsed_event = self._parse_rule_based(raw_event)
+        parsed_event = self._parse_rule_based(raw_event, workspace_root=workspace_root)
         if not use_llm:
             return parsed_event
 
@@ -228,7 +276,11 @@ class RuleBasedEventParser:
         )
         return enriched_event or parsed_event
 
-    def _parse_rule_based(self, raw_event: dict[str, Any]) -> ParsedEvent:
+    def _parse_rule_based(
+        self,
+        raw_event: dict[str, Any],
+        workspace_root: str | Path | None = None,
+    ) -> ParsedEvent:
         merged_text = " ".join(
             [
                 raw_event["event_title"],
@@ -239,9 +291,10 @@ class RuleBasedEventParser:
         )
         normalized_text = _normalize_text(merged_text)
 
-        event_type, event_reasons = self._infer_event_type(normalized_text)
-        target_goal, goal_reasons = self._infer_target_goal(normalized_text, raw_event["target_goal"])
-        target_audience, audience_reasons = self._infer_target_audience(normalized_text, raw_event["target_audience"])
+        classifiers = self._ensure_classifiers(workspace_root)
+        event_type, event_reasons = self._infer_event_type(merged_text, classifiers)
+        target_goal, goal_reasons = self._infer_target_goal(merged_text, classifiers, raw_event["target_goal"])
+        target_audience, audience_reasons = self._infer_target_audience(merged_text, classifiers, raw_event["target_audience"])
         extracted_keywords = self._extract_keywords(raw_event, normalized_text, raw_event["target_audience"])
         constraints = self._normalize_constraints(raw_event.get("constraints", {}), normalized_text)
 
@@ -307,49 +360,74 @@ class RuleBasedEventParser:
             "constraints": payload.get("constraints", {}),
         }
 
-    def _infer_event_type(self, normalized_text: str) -> tuple[str, list[str]]:
-        best_type = "general_influence_event"
-        best_score = 0.0
-        reasons: list[str] = []
+    def _ensure_classifiers(
+        self,
+        workspace_root: str | Path | None,
+    ) -> dict[str, Any]:
+        """按 workspace_root 取本地编码器，构建（并缓存）三个语义分类器。
 
-        for event_type, keywords in EVENT_TYPE_RULES.items():
-            score = self._keyword_score(normalized_text, keywords)
-            if score > best_score:
-                best_type = event_type
-                best_score = score
-                reasons = [f"event_type={event_type}", f"matched_keywords={','.join(self._matched_keywords(normalized_text, keywords))}"]
+        本地模型产物缺失时返回全部为 ``None`` 的分类器字典，调用方据此退化为
+        默认类别，保证没有预计算产物也能解析（只是分类退化为兜底）。
+        """
 
-        if best_score == 0.0:
-            reasons = ["event_type=general_influence_event", "matched_keywords=none"]
-        return best_type, reasons
+        if self._classifiers_ready:
+            return self._classifiers
 
-    def _infer_target_goal(self, normalized_text: str, explicit_goal: str) -> tuple[str, list[str]]:
+        encoder = None
+        try:
+            from .local_models import load_local_models
+
+            if workspace_root is not None:
+                models = load_local_models(workspace_root)
+                encoder = models.encoder if models else None
+        except Exception:  # noqa: BLE001 - 取不到编码器不应中断解析
+            encoder = None
+
+        from .local_semantic import SemanticClassifier
+
+        self._classifiers = {
+            "event_type": SemanticClassifier.build(encoder, EVENT_TYPE_ANCHORS),
+            "target_goal": SemanticClassifier.build(encoder, GOAL_ANCHORS),
+            "target_audience": SemanticClassifier.build(encoder, AUDIENCE_ANCHORS),
+        }
+        self._classifiers_ready = True
+        return self._classifiers
+
+    def _infer_event_type(self, text: str, classifiers: dict[str, Any]) -> tuple[str, list[str]]:
+        clf = classifiers.get("event_type")
+        if clf is None:
+            return "general_influence_event", [
+                "event_type=general_influence_event",
+                "semantic_encoder_unavailable",
+            ]
+        label, score = clf.classify(text, default_label="general_influence_event", margin=0.03)
+        return label, [f"event_type={label}", f"semantic_sim={score:.3f}"]
+
+    def _infer_target_goal(self, text: str, classifiers: dict[str, Any], explicit_goal: str) -> tuple[str, list[str]]:
         if explicit_goal:
             return explicit_goal, [f"target_goal=explicit:{explicit_goal}"]
 
-        best_goal = "awareness"
-        best_score = 0.0
-        reasons: list[str] = []
-        for goal, keywords in GOAL_RULES.items():
-            score = self._keyword_score(normalized_text, keywords)
-            if score > best_score:
-                best_goal = goal
-                best_score = score
-                reasons = [f"target_goal=inferred:{goal}"]
-        if best_score == 0.0:
-            reasons = ["target_goal=inferred:awareness"]
-        return best_goal, reasons
+        clf = classifiers.get("target_goal")
+        if clf is None:
+            return "awareness", ["target_goal=inferred:awareness", "semantic_encoder_unavailable"]
+        label, score = clf.classify(text)
+        return label, [f"target_goal=inferred:{label}", f"semantic_sim={score:.3f}"]
 
     def _infer_target_audience(
         self,
-        normalized_text: str,
+        text: str,
+        classifiers: dict[str, Any],
         explicit_audience: list[str],
     ) -> tuple[list[str], list[str]]:
         inferred = list(explicit_audience)
         reasons = [f"target_audience=explicit:{','.join(explicit_audience)}"] if explicit_audience else []
-        for audience_tag, keywords in AUDIENCE_RULES.items():
-            if self._keyword_score(normalized_text, keywords) > 0.0:
-                inferred.append(audience_tag)
+        clf = classifiers.get("target_audience")
+        if clf is not None:
+            # 取语义最贴近的前两类，避免只给单一标签导致下游话题匹配信号过窄。
+            for label, score in clf.rank(text, 2):
+                if label not in inferred:
+                    inferred.append(label)
+                    reasons.append(f"target_audience=inferred:{label}:{score:.3f}")
         if not inferred:
             inferred.append("general_public")
             reasons.append("target_audience=inferred:general_public")

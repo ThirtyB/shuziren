@@ -2,21 +2,18 @@ import { useEffect, useRef, useState } from "react";
 import { Layers, Target, Users } from "lucide-react";
 import type {
   DispatchMode,
-  EventForm,
   EventSource,
   RunOptions,
   RunStatus,
   SystemEventSummary,
 } from "../types";
 import { SCENARIO_TABS } from "../types";
-import { fetchJson, getSystemEvent, postJson, runImageEvent } from "../lib/api";
+import { fetchJson, getSystemEvent, postJson, runTextImageEvent } from "../lib/api";
 import { errorMessage } from "../lib/options";
 import { DEFAULT_ALLOWED_PLATFORMS } from "../lib/platforms";
-import { eventToForm, FALLBACK_EVENT } from "../lib/eventForm";
 import { Topbar } from "../components/Topbar";
 import { StatusPanel } from "../components/StatusPanel";
 import { ResultPanel } from "../components/ResultPanel";
-import { UserEventForm, getUserEventPayload } from "../components/UserEventForm";
 import { SystemEventPicker } from "../components/SystemEventPicker";
 import { ImageEventForm } from "../components/ImageEventForm";
 import { SingleTargetScenario } from "../scenarios/SingleTargetScenario";
@@ -33,9 +30,10 @@ const SCENARIO_ICONS: Record<DispatchMode, JSX.Element> = {
  * 主控制台：单事件入口。
  *
  * 关键设计：
- *  * 场景（单/多/跨平台）与事件来源（用户/系统）是正交的两条轴：3 × 2 = 6 种组合。
+ *  * 场景（单/多/跨平台）与事件来源（用户/系统）是正交的两条轴。
  *  * 事件来源由顶部 "事件来源" Tab 切换：
- *      - "用户输入"：显示 ``UserEventForm``（表单或 JSON 编辑器）；
+ *      - "用户输入"：显示一段事件描述文本（必填），并可附加图片（可选，
+ *        本地 OCR 后与文字融合再解析为事件）；单人 / 多人 / 跨平台共用同一录入。
  *      - "系统事件"：显示 ``SystemEventPicker``，从 ``/api/events`` 选一条；
  *    两种模式互斥显示，避免一个页面出现两套事件输入。
  *  * ``eventPayload`` 在 ``ConsoleRoute`` 内部归一化后传入 Scenario，Scenario 内部
@@ -68,12 +66,13 @@ export default function ConsoleRoute() {
     setUserText("");
   }, [eventSource]);
 
-  // 用户事件表单状态
-  const [form, setForm] = useState<EventForm>(eventToForm(FALLBACK_EVENT));
-  const [rawJson, setRawJson] = useState<string>(JSON.stringify(FALLBACK_EVENT, null, 2));
-  const [inputMode, setInputMode] = useState<"form" | "json">("form");
+  useEffect(() => {
+    // 切换场景时清空附带图片：图片在"用户输入"下作为可选补充，
+    // 切到其它场景或切走再切回时不应残留上一次选中的文件。
+    setImageFile(null);
+  }, [dispatchMode]);
 
-  // 用户文本输入（multi_user / cross_platform 的"用户输入"模式下使用）：一段事件描述
+  // 用户文本输入（单人/多人/跨平台 的"用户输入"模式下使用）：一段事件描述
   // 文本，提交时发给后端 /api/runs/text 的 event_text 字段，由后端"事件解析"成结构化
   // 事件；下游选人 / 策略 / 输出流程与系统事件完全一致。
   const [userText, setUserText] = useState("");
@@ -82,8 +81,8 @@ export default function ConsoleRoute() {
   const [systemEvent, setSystemEvent] = useState<SystemEventSummary | null>(null);
   const [systemPayload, setSystemPayload] = useState<Record<string, unknown> | null>(null);
 
-  // 多模态图像事件：仅在 eventSource === "image" 时使用；切源时清空，
-  // 避免上一次的 File 对象继续在闭包里"有效"，造成"看起来没选图却能跑"的假象。
+  // 多模态图像：在"用户输入 + 多人/跨平台"以及"单人定向的图文模式"下作为可选补充使用；
+  // 切源或切场景时清空，避免上一次选中的 File 继续在闭包里"有效"，造成"看起来没选图却能跑"的假象。
   const [imageFile, setImageFile] = useState<File | null>(null);
 
   // 运行态
@@ -104,18 +103,6 @@ export default function ConsoleRoute() {
   const [latestRunId, setLatestRunId] = useState("");
   const [refreshTick, setRefreshTick] = useState(0);
 
-  // 初次加载：拉取后端事件模板填充 user form。
-  useEffect(() => {
-    fetchJson<Record<string, unknown>>("/api/event-template")
-      .then((payload) => {
-        setForm(eventToForm(payload));
-        setRawJson(JSON.stringify(payload, null, 2));
-      })
-      .catch(() => {
-        setNotice("后端未就绪，已加载本地模板。");
-      });
-  }, []);
-
   // 自动选第一条结果加载详情；运行完成（state 变化）或切换 history 时都会补加载，
   // 避免「run 有结果但 detail 一直为空」导致面板只显示「选择一个结果查看详情」。
   useEffect(() => {
@@ -127,49 +114,8 @@ export default function ConsoleRoute() {
 
   const isRunning = run?.state === "queued" || run?.state === "running";
 
-  // 归一化 eventPayload
-  const eventPayload: Record<string, unknown> | null = (() => {
-    if (eventSource === "user") {
-      try {
-        return getUserEventPayload(form, rawJson, inputMode);
-      } catch {
-        return null;
-      }
-    }
-    return systemPayload;
-  })();
-
-  function updateForm<K extends keyof EventForm>(key: K, value: EventForm[keyof EventForm]) {
-    setForm((prev) => {
-      const next = { ...prev, [key]: value };
-      // 同步 rawJson，使 JSON 模式与表单保持一致。
-      // 表单不再含 ``event_id``，所以这里也不再把 ``event_id`` 写进 rawJson。
-      if (
-        key === "opinion_variants" ||
-        key === "domain" ||
-        key === "event_title" ||
-        key === "event_summary" ||
-        key === "target"
-      ) {
-        const lines: string[] = (next.opinion_variants || "").split("\n").filter(Boolean);
-        setRawJson(
-          JSON.stringify(
-            {
-              domain: next.domain,
-              event_title: next.event_title,
-              event_summary: next.event_summary,
-              target: next.target,
-              is_synthetic: false,
-              opinion_variants: lines,
-            },
-            null,
-            2,
-          ),
-        );
-      }
-      return next;
-    });
-  }
+  // 归一化 eventPayload：系统事件来源时为后端全字段；用户输入走图文路径，不使用该值。
+  const eventPayload: Record<string, unknown> | null = systemPayload;
 
   async function pickSystemEvent(summary: SystemEventSummary) {
     setSystemEvent(summary);
@@ -197,30 +143,25 @@ export default function ConsoleRoute() {
   }
 
   /**
-   * 提交 run 的统一入口：按事件来源分流到 ``/api/runs/text`` 或
-   * ``/api/runs/image``。Scenario 内部不感知具体实现，事件来源
-   * （``eventSource``）是这一层唯一的判别字段，因此该函数通过
-   * 闭包捕获最新的 ``eventSource`` / ``imageFile``。
+   * 提交 run 的统一入口：按事件来源分流。
+   *  * 用户输入（单人 / 多人 / 跨平台 任一场景）：文字必填，可附加图片
+   *    —— 走 ``/api/runs/text-image``，后端对图片做 OCR 并与文字融合后解析为事件；
+   *    不带图片时退化为纯文本端点。
+   *  * 系统事件：走 ``/api/runs/text`` 提交后端全字段事件。
    */
   async function runViaSource(
     event: Record<string, unknown> | null,
     options: RunOptions,
   ): Promise<RunStatus> {
-    if (eventSource === "image") {
-      if (!imageFile) {
-        throw new Error("请先在'图片输入'区域选择一张图片。");
-      }
-      return runImageEvent(imageFile, options);
-    }
-    // 多人协同 / 跨平台 + 用户输入：事件以"一段文本"提交，由后端事件解析成结构化事件；
-    // 下游选人 / 策略 / 输出流程与系统事件完全一致（只改变事件解析的方式）。
-    if (
-      eventSource === "user" &&
-      (dispatchMode === "multi_user" || dispatchMode === "cross_platform")
-    ) {
+    // 图文（文本+图片）提交：用户输入的任一场景均走此路径。
+    if (eventSource === "user") {
       const text = userText.trim();
       if (!text) {
-        throw new Error("请输入一段事件描述文本。");
+        throw new Error("请输入一段事件描述文本（图片为可选补充）。");
+      }
+      // 带图片：文字 + 图片一起发给后端，由后端 OCR 融合；否则走纯文本端点。
+      if (imageFile) {
+        return runTextImageEvent(text, imageFile, options);
       }
       return postJson<RunStatus>("/api/runs/text", { event_text: text, options });
     }
@@ -394,7 +335,7 @@ export default function ConsoleRoute() {
           <div className="sub-section">
             <div className="sub-section-head">
               <h3>事件来源</h3>
-              <div className="segmented segmented-three">
+              <div className="segmented">
                 <button
                   type="button"
                   className={eventSource === "user" ? "active" : ""}
@@ -409,51 +350,20 @@ export default function ConsoleRoute() {
                 >
                   系统事件
                 </button>
-                <button
-                  type="button"
-                  className={eventSource === "image" ? "active" : ""}
-                  onClick={() => setEventSource("image")}
-                >
-                  图片输入
-                </button>
               </div>
             </div>
             {eventSource === "user" ? (
-              dispatchMode === "single_target" ? (
-                <UserEventForm
-                  form={form}
-                  updateForm={updateForm}
-                  rawJson={rawJson}
-                  setRawJson={setRawJson}
-                  inputMode={inputMode}
-                  onInputModeChange={setInputMode}
-                />
-              ) : (
-                <div className="event-input">
-                  <label className="json-editor">
-                    事件描述（输入一段文本，系统自动解析为事件）
-                    <textarea
-                      value={userText}
-                      rows={12}
-                      onChange={(event) => setUserText(event.target.value)}
-                      placeholder="例如：某地突降暴雨引发城市内涝，多个路段积水严重，市民出行受阻，网上出现多种声音……"
-                      spellCheck={false}
-                    />
-                  </label>
-                  <p className="form-hint">
-                    与系统事件的区别仅在于事件由文本解析得到，其余分发逻辑（选人 / 策略 /
-                    输出）完全一致。
-                  </p>
-                </div>
-              )
-            ) : eventSource === "system" ? (
+              <TextImageEventInput
+                userText={userText}
+                setUserText={setUserText}
+                onFileChange={setImageFile}
+              />
+            ) : (
               <SystemEventPicker
                 selectedEventId={systemEvent?.event_id ?? ""}
                 onSelect={pickSystemEvent}
                 onError={setNotice}
               />
-            ) : (
-              <ImageEventForm onFileChange={setImageFile} />
             )}
           </div>
 
@@ -491,6 +401,48 @@ export default function ConsoleRoute() {
           loading={loadingDetail}
         />
       </main>
+    </div>
+  );
+}
+
+/**
+ * 文本 + 可选图片的事件录入（图文形式）：一段事件描述文本（必填），
+ * 可附加一张本地图片由后端 OCR 后与文字融合。被多人 / 跨平台 以及
+ * 单人定向的"图文"模式共用。
+ */
+function TextImageEventInput({
+  userText,
+  setUserText,
+  onFileChange,
+}: {
+  userText: string;
+  setUserText: (value: string) => void;
+  onFileChange: (file: File | null) => void;
+}) {
+  return (
+    <div className="event-input">
+      <label className="json-editor">
+        事件描述（输入一段文本，系统自动解析为事件）
+        <textarea
+          value={userText}
+          rows={12}
+          onChange={(event) => setUserText(event.target.value)}
+          placeholder="例如：某地突降暴雨引发城市内涝，多个路段积水严重，市民出行受阻，网上出现多种声音……"
+          spellCheck={false}
+        />
+      </label>
+      <p className="form-hint">
+        与系统事件的区别仅在于事件由文本解析得到，其余分发逻辑（选人 / 策略 /
+        输出）完全一致。
+      </p>
+      <div className="optional-image">
+        <h4>可选：附加图片</h4>
+        <p className="form-hint">
+          图片将经过本地 OCR 识别其中文字，与上方文字融合后作为事件描述。
+          不联网、不调用大模型；留空则仅用文字。
+        </p>
+        <ImageEventForm onFileChange={onFileChange} />
+      </div>
     </div>
   );
 }

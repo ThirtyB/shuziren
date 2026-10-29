@@ -88,8 +88,8 @@ export type EventForm = {
   opinion_variants: string;
 };
 
-/** 事件来源模式：用户输入（表单/JSON）、系统事件（从 ``/api/events`` 选）、图片输入（多模态识别）。 */
-export type EventSource = "user" | "system" | "image";
+/** 事件来源模式：用户输入（文字必填、图片可选）、系统事件（从 ``/api/events`` 选）。 */
+export type EventSource = "user" | "system";
 
 /** 系统事件摘要：来自 ``/api/events`` 列表接口；不包含 opinion_variants 全文。 */
 export type SystemEventSummary = {

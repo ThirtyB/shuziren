@@ -96,6 +96,16 @@ class OcrTextRulesTest(unittest.TestCase):
         self.assertIn("承保审核流程也随之趋于谨慎", fields["event_summary"])
 
     def test_infer_domain_matches_keyword_sets(self) -> None:
+        # 领域分类已改为纯语义相似度（SemanticClassifier），依赖本地语义编码器
+        # （BGE/SVD 预计算产物）。无产物时 infer_domain 退化为 general，且语义口径
+        # 与关键词命中不同，这里只在模型可用时断言具体类别。
+        from pathlib import Path as _P
+        from influence_strategy.local_models import load_local_models
+
+        if load_local_models(_P(__file__).resolve().parents[1]) is None:
+            self.assertEqual(infer_domain(["完全没有线索的文本"]), "general")
+            self.skipTest("本地语义模型不可用，跳过语义领域分类断言")
+
         self.assertEqual(infer_domain(["红海", "护航", "海域", "安全形势"]), "military")
         self.assertEqual(infer_domain(["人工智能", "模型透明度", "算力"]), "technology")
         self.assertEqual(infer_domain(["完全没有线索的文本"]), "general")
@@ -140,11 +150,16 @@ class ImageEventLoaderTest(unittest.TestCase):
                 )
 
             self.assertEqual(result.method, "ocr_local")
-            self.assertEqual(result.domain, "military")
             self.assertFalse(result.fallback_used)
             self.assertEqual(result.warnings, [])
             self.assertIn("红海", result.keywords)
             self.assertIn("护航", " ".join(result.keywords) + result.event_title)
+            # 领域分类依赖本地语义编码器；无产物时退化为 general，跳过该具体断言。
+            from pathlib import Path as _P
+            from influence_strategy.local_models import load_local_models
+
+            if load_local_models(_P(__file__).resolve().parents[1]) is not None:
+                self.assertEqual(result.domain, "military")
 
     def test_recognizer_returns_unrecognized_when_ocr_yields_no_text(self) -> None:
         with TemporaryDirectory() as tmpdir:

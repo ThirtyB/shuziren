@@ -31,9 +31,8 @@ export type SharedScenarioProps = {
   isRunning: boolean;
   /**
    * 提交运行：由父组件 ``ConsoleRoute`` 提供，分流到对应的后端端点。
-   *  - ``eventSource="user"|"system"`` 时，``event`` 是表单/系统事件 payload；
-   *  - ``eventSource="image"`` 时，``event`` 可以是 null，run 会改为
-   *    POST ``/api/runs/image`` + FormData（``submit`` 内部用闭包捕获 imageFile）。
+   *  * ``eventSource="user"|"system"`` 时，``event`` 是表单/系统事件 payload；
+   *  * 用户输入 + 多人/跨平台时，``submit`` 内部改用文字（可附图片）提交。
    * Scenario 不感知事件来源的具体实现。
    */
   submit: (event: Record<string, unknown> | null, options: RunOptions) => Promise<RunStatus>;
@@ -57,10 +56,8 @@ export function SingleTargetScenario(props: SingleTargetScenarioProps) {
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
-    // 注意：``eventPayload === null`` 是合法的——``eventSource === "image"`` 时
-    // 由 ``props.submit`` 直接走 ``/api/runs/image`` + FormData，不需要事件 payload。
-    // 这里不再做"必须有 event"的短路校验，统一由 ``ConsoleRoute`` 的 runViaSource
-    // 按事件来源分流校验。
+    // ``eventPayload`` 由父组件统一分流校验（文字/图片/系统事件），这里只校验本场景专属参数。
+    // 不再做"必须有 event"的短路校验，统一由 ``ConsoleRoute`` 的 runViaSource 处理。
     if (!targetUserId.trim()) {
       onError("单人定向分发必须填写目标数字人 user_id。");
       return;
@@ -83,8 +80,9 @@ export function SingleTargetScenario(props: SingleTargetScenarioProps) {
   return (
     <form className="stack" onSubmit={handleSubmit}>
       <div className="scenario-hint">
-        指定一个数字人作为本次事件的唯一首发者；其余数字人（互动/扩散/支持）由
-        评估流水线以该数字人为锚点生成。
+        指定一个数字人作为本次事件的主发布节点。系统以该数字人为核心，自主完成
+        「首发期发布 → 互动期自赞 → 扩散期自转发 → 支持期自赞并再发承接帖」的
+        自运营闭环。只需提供数字人、时间窗口与事件。
       </div>
 
       <label className="wide">
@@ -111,9 +109,10 @@ export function SingleTargetScenario(props: SingleTargetScenarioProps) {
           setProfileLimit={props.setProfileLimit}
           allowedPlatforms={props.allowedPlatforms}
           setAllowedPlatforms={props.setAllowedPlatforms}
-          // 单人定向：1 人固定、无选人池（目标数字人本身的平台由后端推断）。
+          // 单人分发：仅保留“时间窗口”，其余进阶参数按默认值即可。
           showMaxSelectedNodes={false}
           showAllowedPlatforms={false}
+          showAdvancedOptions={false}
         />
       </div>
 

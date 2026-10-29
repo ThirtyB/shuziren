@@ -22,8 +22,7 @@ export function MultiUserScenario(props: SharedScenarioProps) {
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
-    // 注意：``eventPayload === null`` 是合法的——``eventSource === "image"`` 时
-    // 由 ``props.submit`` 直接走 ``/api/runs/image`` + FormData，不需要事件 payload。
+    // ``eventPayload`` 由父组件统一分流校验（文字/图片/系统事件），这里只校验本场景参数。
     if (!dispatchPlatform) {
       onError("多人协同分发必须指定一个分发平台。");
       return;

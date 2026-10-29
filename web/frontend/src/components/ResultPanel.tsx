@@ -252,6 +252,13 @@ function CrossPlatformDetail({
   );
 }
 
+const ROLE_LABEL_MAP: Record<string, string> = {
+  core_publish_node: "主发布节点",
+  interaction_response_node: "互动回应节点",
+  amplification_node: "扩散节点",
+  support_node: "支持节点",
+};
+
 function SingleTargetDetail({
   payload,
   result,
@@ -280,7 +287,10 @@ function SingleTargetDetail({
           </div>
           <div>
             <span>目标角色</span>
-            <strong>{String(targetDispatch?.target_role ?? diag.target_role ?? "-")}</strong>
+            <strong>
+              {ROLE_LABEL_MAP[String(targetDispatch?.target_role ?? diag.target_role ?? "")] ??
+                String(targetDispatch?.target_role ?? diag.target_role ?? "-")}
+            </strong>
           </div>
         </div>
         {Array.isArray(targetDispatch?.warnings) && targetDispatch!.warnings!.length > 0 && (
@@ -357,9 +367,9 @@ function FiveDimension({ payload }: { payload: Record<string, unknown> }) {
         <DataTable items={timePlanRows} />
       </section>
 
-      {/* 频率维度：单独占一行，精简为「编号 · 条/小时」。 */}
+      {/* 频率维度：单独占一行，精简为「编号 · 条/天」。 */}
       <section className="result-section">
-        <h3>频率（条/小时）</h3>
+        <h3>频率（条/天）</h3>
         <FrequencyView items={frequencyItems} />
       </section>
 
@@ -492,10 +502,10 @@ function StageStatView({
 }
 
 /**
- * 频率可视化（精简版）：每个数字人一行，直接给出「条/小时」速率。
+ * 频率可视化（精简版）：每个数字人一行，直接给出「条/天」速率。
  *
- * 后端已把动作数量换算成 ``条每小时``（多人模式 = 实际动作数 / 活动窗口小时，
- * 单人模式 = 计划频率 / 24）。多人模式顺带把动作类型分布作为次要信息附在后面。
+ * 后端已把动作数量换算成 ``条每天``（多人模式 = 实际动作数 / 活动窗口天，
+ * 单人模式 = 计划频率 / 天）。多人模式顺带把动作类型分布作为次要信息附在后面。
  */
 function FrequencyView({
   items,
@@ -509,7 +519,7 @@ function FrequencyView({
     <div className="freq-compact">
       {items.map((item) => {
         const no = String(item["数字人编号"] ?? item["数字人id"] ?? "-");
-        const perHour = item["条每小时"];
+        const perDay = item["条每天"];
         const stats =
           (item["动作统计"] as Record<string, unknown> | undefined) ?? {};
         const detail = Object.entries(stats)
@@ -520,7 +530,13 @@ function FrequencyView({
           <div className="freq-row" key={no}>
             <span className="freq-no">{no}</span>
             <span className="freq-rate">
-              {perHour != null ? `${Number(perHour).toFixed(2)} 条/小时` : "-"}
+              {perDay != null
+                ? `${
+                    Number(perDay) % 1 === 0
+                      ? Number(perDay).toFixed(0)
+                      : Number(perDay).toFixed(2)
+                  } 条/天`
+                : "-"}
             </span>
             {detail && <span className="freq-detail">（{detail}）</span>}
           </div>

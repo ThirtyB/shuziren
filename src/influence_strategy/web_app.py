@@ -31,6 +31,7 @@ from .eval_hot_events import (
     select_hot_events,
 )
 from .image_event_loader import SUPPORTED_IMAGE_SUFFIXES, load_image_events
+from .ocr_recognizer import run_ocr
 from .llm_client import LLMClientError, OpenAICompatibleLLMClient
 from .platform_dispatcher import PlatformSpec, to_json_dict
 
@@ -183,6 +184,18 @@ def create_app() -> FastAPI:
         except Exception:  # noqa: BLE001 - 预加载失败不应阻止服务启动
             pass
 
+        # 预热 OCR 引擎（RapidOCR 三个 ONNX 模型加载，约 1~2s）。
+        # 不预热时，进程内「第一个图片请求」会把这次加载算进去，2MB 截图可能冲到 6~7s；
+        # 预热后首请求落回 ~4.5s、后续稳定在 2.5~3s（CPU）。启动期一次性付清加载成本，
+        # OCR 不可用（缺依赖）时静默跳过，不影响纯文本 / 系统事件流程。
+        try:
+            from .ocr_recognizer import is_ocr_available, _load_engine
+
+            if is_ocr_available():
+                _load_engine()
+        except Exception:  # noqa: BLE001 - 预加载失败不应阻止服务启动
+            pass
+
     @app.get("/api/health")
     def health() -> dict[str, Any]:
         return {
@@ -319,6 +332,57 @@ def create_app() -> FastAPI:
             status["run_id"],
             lambda: _run_image_job(
                 run_id=status["run_id"],
+                image_path=image_path,
+                options=parsed_options,
+            ),
+        )
+        return _read_status(status["run_id"])
+
+    @app.post("/api/runs/text-image", response_model=RunStatus)
+    def run_text_image_event(
+        event_text: str = Form(...),
+        image: UploadFile | None = File(None),
+        options: str = Form("{}"),
+    ) -> dict[str, Any]:
+        """用户输入：文字必选 + 图片可选。
+
+        文字直接作为事件描述；若附带图片，后端先用本地 OCR 识别图片上的文字，
+        再与用户输入文字融合为一段完整的事件描述，交给与纯文本相同的规则事件解析
+        链路（``_event_from_text_request``）处理。下游选人 / 策略 / 输出流程完全
+        一致，因此这里只是"事件解析方式"多了 OCR 融合这一步，不改变后续任何逻辑。
+        """
+
+        parsed_options = _parse_options(options)
+        _validate_dispatch_options(parsed_options)
+
+        if not event_text or not event_text.strip():
+            raise HTTPException(status_code=400, detail="event_text 不能为空。")
+
+        status = _create_run(
+            mode="text",
+            total=1,
+            dispatch_mode=parsed_options.dispatch_mode,
+        )
+        image_path: Path | None = None
+        if image is not None and getattr(image, "filename", ""):
+            suffix = Path(image.filename or "").suffix.lower()
+            if suffix not in SUPPORTED_IMAGE_SUFFIXES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unsupported image type: {suffix or image.filename}",
+                )
+            run_dir = _run_dir(status["run_id"])
+            upload_dir = run_dir / "uploads"
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            image_path = upload_dir / f"input{suffix}"
+            with image_path.open("wb") as handle:
+                shutil.copyfileobj(image.file, handle)
+
+        _submit_job(
+            status["run_id"],
+            lambda: _run_text_image_job(
+                run_id=status["run_id"],
+                event_text=event_text,
                 image_path=image_path,
                 options=parsed_options,
             ),
@@ -788,6 +852,53 @@ def _run_image_job(*, run_id: str, image_path: Path, options: RunOptions) -> Non
     )
     _update_status(run_id, total=len(events))
     _run_events_job(run_id=run_id, events=events, options=options)
+
+
+def _fuse_text_and_ocr(event_text: str, image_path: Path | None) -> str:
+    """把用户输入文字与图片 OCR 文字融合成一段事件描述。
+
+    融合策略：用户输入为主，OCR 文本作为补充内容追加在后面。图片缺失或 OCR
+    不可用时，仅保留用户文字（不抛异常，由上层决定是否降级）。
+    """
+
+    text = (event_text or "").strip()
+    if image_path is None:
+        return text
+    try:
+        outcome = run_ocr(image_path)
+    except Exception:
+        return text
+    ocr_text = "\n".join(outcome.kept_texts).strip()
+    if not ocr_text:
+        return text
+    if not text:
+        return ocr_text
+    return f"{text}\n{ocr_text}"
+
+
+def _run_text_image_job(
+    *,
+    run_id: str,
+    event_text: str,
+    image_path: Path | None,
+    options: RunOptions,
+) -> None:
+    """文字 + 可选图片：OCR 融合后走与纯文本完全相同的事件解析与下游流程。"""
+
+    _update_status(run_id, current_event_id="image_recognition")
+    try:
+        combined_text = _fuse_text_and_ocr(event_text, image_path)
+    except Exception as exc:  # OCR 异常不应让整次运行崩溃，降级为仅用文字
+        combined_text = (event_text or "").strip()
+        if not combined_text:
+            raise ValueError(f"文字输入为空且图片识别失败：{exc}") from exc
+    _update_status(run_id, current_event_id=None)
+
+    if not combined_text.strip():
+        raise ValueError("文字输入与图片识别结果均为空，无法构建事件。")
+    request = TextRunRequest(event_text=combined_text, options=options)
+    event = _event_from_text_request(request)
+    _run_events_job(run_id=run_id, events=[event], options=options)
 
 
 def _validate_dispatch_options(options: RunOptions) -> None:

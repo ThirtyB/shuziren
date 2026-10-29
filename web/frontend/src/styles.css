@@ -706,7 +706,7 @@ h3 {
   color: #617080;
 }
 
-/* 频率（精简版）：编号 + 条/小时，去掉原有条形图 */
+/* 频率（精简版）：编号 + 条/天，去掉原有条形图 */
 .freq-compact {
   display: flex;
   flex-direction: column;
@@ -1754,7 +1754,7 @@ details pre {
   background: #fef2f2;
 }
 
-/* === 多模态"用户/系统/图片"三栏事件来源切换器 === */
+/* === "用户/系统"两栏事件来源切换器 === */
 .segmented.segmented-three {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   width: 280px;
