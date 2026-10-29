@@ -7,7 +7,15 @@ from typing import Any
 import pandas as pd
 
 from .llm_client import LLMClientError, OpenAICompatibleLLMClient
-from .models import NodeScore, ScoreResult, SelectedNode, SelectionResult, SelectionSummary
+from .models import (
+    NodeScore,
+    ParsedEvent,
+    ScoreResult,
+    SelectedNode,
+    SelectionResult,
+    SelectionSummary,
+    UserProfile,
+)
 from .platform_profiles import normalize_platform_key
 from .prompts import build_selector_system_prompt, build_selector_user_prompt
 
@@ -38,16 +46,16 @@ SELECTED_ROLE_TO_ROLE_HINT: dict[str, str] = {
 }
 
 ROLE_HINT_TO_DISPATCH_STAGE: dict[str, str] = {
-    "core_broadcast": "stage_1_launch",
-    "interaction_response": "stage_2_engage",
-    "amplification": "stage_3_amplify",
-    "general_support": "stage_2_support",
+    "core_broadcast": "stage_node_activation",
+    "interaction_response": "stage_node_activation",
+    "amplification": "stage_info_diffusion",
+    "general_support": "stage_consensus",
 }
 
 #: 未识别的 role_hint 兜底（与历史实现保持一致，不引入新的行为）。
 DEFAULT_SELECTED_ROLE = "support_node"
 DEFAULT_ROLE_HINT = "general_support"
-DEFAULT_DISPATCH_STAGE = "stage_2_support"
+DEFAULT_DISPATCH_STAGE = "stage_consensus"
 
 # --------------------------------------------------------------------------- #
 # 多人协同（单平台）身份配额
@@ -162,10 +170,45 @@ class Selector:
         llm_client: Any | None = None,
         target_user_id: str | None = None,
         dispatch_platform: str | None = None,
+        single_target_mode: str = "self_operate",
+        target_old_post_id: str | None = None,
+        water_army_enabled: bool = False,
+        water_army_count: int = 0,
+        water_army_profiles: dict[str, UserProfile] | None = None,
     ) -> SelectionResult:
         if target_user_id:
-            return self._select_targeted(score_result, target_user_id)
+            if single_target_mode == "attention":
+                result = self._select_attention(score_result, target_user_id, target_old_post_id)
+            else:
+                result = self._select_targeted(score_result, target_user_id)
+        else:
+            result = self._select_automatic(score_result, dispatch_platform)
 
+        # 白库水军：仅在启用时参与，不计入选人上限，也不影响角色编排。
+        if water_army_enabled and water_army_profiles:
+            result.water_army_nodes = self._build_water_army_nodes(
+                water_army_profiles,
+                event=score_result.event,
+                platforms=list(score_result.event.constraints.allowed_platforms),
+                max_count=water_army_count,
+                exclude_user_ids={
+                    n.user_id for n in result.selected_nodes
+                }
+                | ({result.summary.target_user_id} if result.summary.target_user_id else set()),
+            )
+            result.summary.water_army_enabled = True
+            result.summary.water_army_count = len(result.water_army_nodes)
+            result.summary.water_army_platforms = sorted(
+                {n.platform for n in result.water_army_nodes if n.platform}
+            )
+        return result
+
+    def _select_automatic(
+        self,
+        score_result: ScoreResult,
+        dispatch_platform: str | None = None,
+        exclude_user_ids: set[str] | None = None,
+    ) -> SelectionResult:
         max_selected = score_result.event.constraints.max_selected_nodes
 
         # 多人分发必须指定平台：只在候选池中保留归属该平台的数字人，
@@ -173,6 +216,10 @@ class Selector:
         candidate_nodes = self._filter_nodes_by_platform(
             score_result.node_scores, dispatch_platform
         )
+        if exclude_user_ids:
+            candidate_nodes = [
+                node for node in candidate_nodes if node.user_id not in exclude_user_ids
+            ]
 
         safe_pool = [
             node for node in candidate_nodes if node.eligible and not node.manual_review_required
@@ -422,7 +469,7 @@ class Selector:
 
         Keeps the original scorer output for the target user untouched and
         only emits diagnostics (no fallback nodes, no role rebalancing). The
-        target user is forced to ``core_publish_node`` / ``stage_1_launch`` so
+        target user is forced to ``core_publish_node`` / ``stage_node_activation`` so
         that downstream StrategyGenerator treats them as the core publisher.
         The target's simulated platform (``NodeScore.platform``) is surfaced in
         both ``selection_reasons`` and ``SelectionSummary.target_platform`` so
@@ -432,7 +479,7 @@ class Selector:
         not want to silently fall back to automatic selection.
         """
         target_role = "core_publish_node"
-        dispatch_stage = "stage_1_launch"
+        dispatch_stage = "stage_node_activation"
 
         target_node = next(
             (node for node in score_result.node_scores if node.user_id == target_user_id),
@@ -496,6 +543,94 @@ class Selector:
             selected_nodes=[selected_node],
             fallback_nodes=[],
         )
+
+    def _select_attention(
+        self,
+        score_result: ScoreResult,
+        target_user_id: str,
+        target_old_post_id: str | None,
+    ) -> SelectionResult:
+        """思路二（数字人注意）：多数字人协同，全程 @ 指定路人（被动、不反应）。
+
+        选人逻辑与多人协同一致（按角色配额从候选池挑演员），但强制排除被点名的
+        路人本人；selection_mode 标记为 "attention"，并把路人身份写入 summary，
+        供下游在帖文里注入 @ 点名内容。被点名路人本身不分配任何动作。
+        """
+        target_node = next(
+            (node for node in score_result.node_scores if node.user_id == target_user_id),
+            None,
+        )
+        if target_node is None:
+            raise ValueError(
+                f"target_user_id '{target_user_id}' 不在当前事件的候选数字人画像中，"
+                "请检查该用户是否存在于 profiles 数据中或扩大 profile_limit。"
+            )
+        target_user_name = target_node.user_name
+        target_platform = normalize_platform_key(target_node.platform) or None
+        warnings = self._evaluate_target_warnings(target_node, score_result.node_scores)
+
+        # 复用多人协同选人逻辑，但演员中排除被点名的路人。
+        result = self._select_automatic(
+            score_result, None, exclude_user_ids={target_user_id}
+        )
+        result.summary.selection_mode = "attention"
+        result.summary.target_user_id = target_user_id
+        result.summary.target_user_name = target_user_name
+        result.summary.target_platform = target_platform
+        result.summary.target_old_post_id = target_old_post_id
+        result.summary.target_warning = warnings
+        return result
+
+    def _build_water_army_nodes(
+        self,
+        water_army_profiles: dict[str, UserProfile],
+        *,
+        event: ParsedEvent,
+        platforms: list[str],
+        max_count: int,
+        exclude_user_ids: set[str],
+    ) -> list[SelectedNode]:
+        """从白库挑水军：只在事件平台上的低活跃账号，且不与真实演员/目标路人重复。
+
+        水军只做点赞 / 转发（不附带文本），因此无需语义打分，随机抽取即可；
+        返回 SelectedNode 列表，is_water_army=True，标记 role/stage 为 water_army。
+        """
+        if not water_army_profiles or max_count <= 0:
+            return []
+        platform_set = {normalize_platform_key(p) for p in platforms}
+        candidates = [
+            prof
+            for prof in water_army_profiles.values()
+            if normalize_platform_key(prof.platform) in platform_set
+            and prof.user_id not in exclude_user_ids
+        ]
+        chosen = candidates[: max_count]
+        nodes: list[SelectedNode] = []
+        for rank, prof in enumerate(chosen, start=1):
+            node_score = NodeScore(
+                user_id=prof.user_id,
+                user_name=prof.user_name,
+                event_id=event.event_id,
+                event_type=event.event_type,
+                role_hint="special_support",
+                platform=prof.platform,
+                follower_count=prof.user_followers,
+                friend_count=prof.user_friends,
+                is_water_army=True,
+                eligible=True,
+                final_score=0.0,
+            )
+            nodes.append(
+                SelectedNode(
+                    **node_score.model_dump(),
+                    selection_rank=rank,
+                    selected_role="special_support",
+                    dispatch_stage="special_support",
+                    dispatch_priority="p3",
+                    selection_bucket="primary",
+                )
+            )
+        return nodes
 
     def _evaluate_target_warnings(
         self,

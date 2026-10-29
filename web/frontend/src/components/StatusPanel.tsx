@@ -4,39 +4,24 @@ import { platformLabel } from "../lib/platforms";
 import { SectionTitle } from "./SectionTitle";
 import { Stat } from "./Stat";
 import { StatusBadge } from "./StatusBadge";
-import { RunHistoryPanel } from "./RunHistoryPanel";
-import type { RunHistoryEntry } from "../lib/api";
 
 export function StatusPanel({
   run,
   notice,
   selectedEventId,
   onSelect,
-  history,
 }: {
   run: RunStatus | null;
   notice: string;
   selectedEventId: string;
   onSelect: (eventId: string) => void;
-  history: {
-    activeRunId: string;
-    refreshTick: number;
-    onSelectRun: (entry: RunHistoryEntry) => void;
-    onAfterDelete?: (deletedRunId: string, remaining: RunHistoryEntry[]) => void;
-  };
 }) {
   if (!run) {
     return (
       <section className="panel status-panel">
         <SectionTitle title="任务状态" />
         {notice && <div className="message">{notice}</div>}
-        <RunHistoryPanel
-          activeRunId={history.activeRunId}
-          refreshTick={history.refreshTick}
-          onSelectRun={history.onSelectRun}
-          onAfterDelete={history.onAfterDelete}
-        />
-        <div className="empty-state">暂无正在跑的 run；选一条历史或返回上方发起新任务。</div>
+        <div className="empty-state">暂无正在跑的 run；点右上角「运行历史」查看或发起新任务。</div>
       </section>
     );
   }
@@ -46,12 +31,6 @@ export function StatusPanel({
     <section className="panel status-panel">
       <SectionTitle title="任务状态" extra={<DispatchModeChip mode={run.dispatch_mode} />} />
       {notice && <div className="message">{notice}</div>}
-      <RunHistoryPanel
-        activeRunId={history.activeRunId}
-        refreshTick={history.refreshTick}
-        onSelectRun={history.onSelectRun}
-        onAfterDelete={history.onAfterDelete}
-      />
       <div className="status-row">
         <StatusBadge state={run.state} />
         <span className="run-id">{run.run_id}</span>

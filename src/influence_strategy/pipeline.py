@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from .data_loader import DataLoader
 from .event_parser import RuleBasedEventParser
 from .feature_builder import FeatureBuilder
 from .llm_client import OpenAICompatibleLLMClient
@@ -57,6 +58,10 @@ class StrategyPipeline:
         llm_client: Any | None = None,
         target_user_id: str | None = None,
         dispatch_platform: str | None = None,
+        single_target_mode: str = "self_operate",
+        target_old_post_id: str | None = None,
+        water_army_enabled: bool = False,
+        water_army_count: int = 0,
         recall_size: int | None = None,
         recall_mode: Literal["platform_aware"] | None = None,
     ) -> StrategyResult:
@@ -68,6 +73,10 @@ class StrategyPipeline:
             llm_client=llm_client,
             target_user_id=target_user_id,
             dispatch_platform=dispatch_platform,
+            single_target_mode=single_target_mode,
+            target_old_post_id=target_old_post_id,
+            water_army_enabled=water_army_enabled,
+            water_army_count=water_army_count,
             recall_size=recall_size,
             recall_mode=recall_mode,
         ).strategy_result
@@ -81,6 +90,10 @@ class StrategyPipeline:
         llm_client: Any | None = None,
         target_user_id: str | None = None,
         dispatch_platform: str | None = None,
+        single_target_mode: str = "self_operate",
+        target_old_post_id: str | None = None,
+        water_army_enabled: bool = False,
+        water_army_count: int = 0,
         recall_size: int | None = None,
         recall_mode: Literal["platform_aware"] | None = None,
     ) -> PipelineArtifacts:
@@ -121,6 +134,16 @@ class StrategyPipeline:
         score_result = self.scorer.score(feature_result)
         stage_times["scorer"] = time.perf_counter() - t0
 
+        # 白库水军：仅在启用时加载，用于放大参与人数（不计入选人上限）。
+        water_army_profiles: dict[str, Any] = {}
+        if water_army_enabled:
+            try:
+                water_army_profiles = DataLoader(
+                    workspace_root, product_name=self.product_name
+                ).load_water_army_profiles()
+            except (OSError, ValueError):
+                water_army_profiles = {}
+
         t0 = time.perf_counter()
         selection_result = self.selector.select(
             score_result,
@@ -130,6 +153,11 @@ class StrategyPipeline:
             llm_client=client,
             target_user_id=target_user_id,
             dispatch_platform=dispatch_platform,
+            single_target_mode=single_target_mode,
+            target_old_post_id=target_old_post_id,
+            water_army_enabled=water_army_enabled,
+            water_army_count=water_army_count,
+            water_army_profiles=water_army_profiles,
         )
         stage_times["selector"] = time.perf_counter() - t0
 

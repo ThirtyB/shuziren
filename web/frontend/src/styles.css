@@ -739,9 +739,13 @@ h3 {
   font-size: 12px;
 }
 
-/* 运行耗时旁「!」展开模块耗时 */
-.info-toggle {
+/* 运行耗时旁「!」悬停浮窗展示模块耗时 */
+.info-toggle-wrap {
+  position: relative;
+  display: inline-flex;
   margin-left: 6px;
+}
+.info-toggle {
   width: 18px;
   height: 18px;
   border-radius: 50%;
@@ -758,12 +762,36 @@ h3 {
   background: #2f6fed;
   color: #fff;
 }
-.module-times {
-  margin-top: 8px;
+.module-times-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 60;
+  width: 260px;
+  background: #ffffff;
   border: 1px solid #d8e0e7;
-  border-radius: 8px;
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18);
   padding: 8px 10px;
-  background: #f8fafc;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-4px);
+  transition: opacity 0.12s ease, transform 0.12s ease, visibility 0.12s;
+  pointer-events: none;
+}
+.info-toggle-wrap:hover .module-times-popover,
+.info-toggle-wrap:focus-within .module-times-popover {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+.module-times {
+  margin-top: 0;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  background: transparent;
 }
 .module-times-head {
   font-size: 12px;
@@ -1643,6 +1671,78 @@ details pre {
   transform: rotate(180deg);
 }
 
+/* === 运行历史侧边栏（常态隐藏的抽屉） === */
+.history-sidebar-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.32);
+  z-index: 50;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.history-sidebar-panel {
+  width: min(420px, 92vw);
+  height: 100%;
+  background: #ffffff;
+  box-shadow: -8px 0 24px rgba(15, 23, 42, 0.18);
+  display: flex;
+  flex-direction: column;
+  animation: slide-in-right 0.18s ease-out;
+}
+
+@keyframes slide-in-right {
+  from {
+    transform: translateX(24px);
+    opacity: 0.6;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.history-sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid #e3e9ef;
+}
+
+.history-sidebar-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: #10212f;
+}
+
+.history-sidebar-body {
+  flex: 1;
+  overflow: auto;
+  padding: 10px;
+}
+
+/* embedded 模式下去掉面板自带边框/背景，作为侧边栏内容呈现 */
+.run-history-embedded {
+  border: 0;
+  background: transparent;
+  margin: 0;
+}
+
+.run-history-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 6px;
+}
+
+.icon-button.active {
+  border-color: #0f766e;
+  background: #e7f5f1;
+  color: #0f766e;
+}
+
 .spin {
   animation: spin 1s linear infinite;
 }
@@ -1680,6 +1780,45 @@ details pre {
   color: #617080;
   font-size: 12px;
   line-height: 1.5;
+}
+
+/* 策略结果里的识别原图预览 */
+.image-preview {
+  border: 1px solid #d8e0e7;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fbfcfd;
+}
+.image-preview-head {
+  font-size: 13px;
+  font-weight: 600;
+  color: #10212f;
+  margin-bottom: 8px;
+}
+.image-preview-img {
+  display: block;
+  max-width: 100%;
+  max-height: 320px;
+  border-radius: 6px;
+  border: 1px solid #e3e9ef;
+  object-fit: contain;
+  background: #fff;
+}
+
+/* 运行历史里的「图」标记 */
+.run-history-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: #0f766e;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
 }
 
 .image-event-preview {

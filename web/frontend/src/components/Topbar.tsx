@@ -1,5 +1,5 @@
 import { NavLink } from "react-router-dom";
-import { FlaskConical, LayoutGrid, RefreshCcw } from "lucide-react";
+import { FlaskConical, History, LayoutGrid, RefreshCcw } from "lucide-react";
 
 export function Topbar({
   useLlm,
@@ -7,12 +7,18 @@ export function Topbar({
   refresh,
   hasRun,
   subtitle,
+  onToggleHistory,
+  historyOpen,
 }: {
   useLlm: boolean;
   setUseLlm: (value: boolean) => void;
   refresh: () => void;
   hasRun: boolean;
   subtitle: string;
+  /** 提供时渲染「运行历史」开关（仅在主控制台传入）。 */
+  onToggleHistory?: () => void;
+  /** 当前侧边栏是否展开，用于高亮按钮。 */
+  historyOpen?: boolean;
 }) {
   return (
     <header className="topbar">
@@ -42,6 +48,17 @@ export function Topbar({
             测试控制台
           </NavLink>
         </nav>
+        {onToggleHistory && (
+          <button
+            type="button"
+            className={historyOpen ? "icon-button active" : "icon-button"}
+            onClick={onToggleHistory}
+            aria-pressed={!!historyOpen}
+          >
+            <History size={18} />
+            运行历史
+          </button>
+        )}
         <label className="toggle">
           <input
             type="checkbox"

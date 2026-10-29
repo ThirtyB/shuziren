@@ -27,6 +27,11 @@ export type SharedScenarioProps = {
   setMaxFrequencyPerDay: (value: number) => void;
   allowedPlatforms: string;
   setAllowedPlatforms: (value: string) => void;
+  // 特殊支持节点参与开关与数量（所有分发模式共用）。
+  waterArmyEnabled: boolean;
+  setWaterArmyEnabled: (value: boolean) => void;
+  waterArmyCount: number;
+  setWaterArmyCount: (value: number) => void;
   useLlm: boolean;
   isRunning: boolean;
   /**
@@ -53,6 +58,8 @@ export function SingleTargetScenario(props: SingleTargetScenarioProps) {
   const { eventPayload, isRunning, onStart, onError } = props;
   const [targetUserId, setTargetUserId] = useState("");
   const [busy, setBusy] = useState(false);
+  const [singleTargetMode, setSingleTargetMode] = useState<"self_operate" | "attention">("self_operate");
+  const [oldPostId, setOldPostId] = useState("POST-0001");
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
@@ -67,6 +74,8 @@ export function SingleTargetScenario(props: SingleTargetScenarioProps) {
       const options = buildOptions(props, {
         dispatch_mode: "single_target",
         target_user_id: targetUserId.trim(),
+        single_target_mode: singleTargetMode,
+        target_old_post_id: singleTargetMode === "attention" ? oldPostId.trim() || null : null,
       });
       const run = await props.submit(eventPayload, options);
       onStart(run);
@@ -80,9 +89,9 @@ export function SingleTargetScenario(props: SingleTargetScenarioProps) {
   return (
     <form className="stack" onSubmit={handleSubmit}>
       <div className="scenario-hint">
-        指定一个数字人作为本次事件的主发布节点。系统以该数字人为核心，自主完成
-        「首发期发布 → 互动期自赞 → 扩散期自转发 → 支持期自赞并再发承接帖」的
-        自运营闭环。只需提供数字人、时间窗口与事件。
+        {singleTargetMode === "attention"
+          ? "多数字人协同，全程 @ 指定路人（被动、不反应），使其注意到事件。只需提供路人、时间窗口与事件。"
+          : "指定一个数字人作为本次事件的主发布节点。系统以该数字人为核心，自主完成「节点激活时期发布 → 节点激活时期自赞 → 信息扩散时期自转发 → 共识形成阶段自赞并再发承接帖」的自运营闭环。只需提供数字人、时间窗口与事件。"}
       </div>
 
       <label className="wide">
@@ -93,6 +102,34 @@ export function SingleTargetScenario(props: SingleTargetScenarioProps) {
           placeholder="例如 110133（必填，平台由系统从该数字人画像自动推断）"
         />
       </label>
+
+      <div className="segmented">
+        <button
+          type="button"
+          className={singleTargetMode === "self_operate" ? "active" : ""}
+          onClick={() => setSingleTargetMode("self_operate")}
+        >
+          单人分发
+        </button>
+        <button
+          type="button"
+          className={singleTargetMode === "attention" ? "active" : ""}
+          onClick={() => setSingleTargetMode("attention")}
+        >
+          数字人注意
+        </button>
+      </div>
+
+      {singleTargetMode === "attention" && (
+        <label className="wide">
+          被点名路人旧帖编号（仅用于 @ 点名）
+          <input
+            value={oldPostId}
+            onChange={(event) => setOldPostId(event.target.value)}
+            placeholder="例如 POST-0001"
+          />
+        </label>
+      )}
 
       <div className="sub-section">
         <h3>基础运行参数</h3>
@@ -109,6 +146,10 @@ export function SingleTargetScenario(props: SingleTargetScenarioProps) {
           setProfileLimit={props.setProfileLimit}
           allowedPlatforms={props.allowedPlatforms}
           setAllowedPlatforms={props.setAllowedPlatforms}
+          waterArmyEnabled={props.waterArmyEnabled}
+          setWaterArmyEnabled={props.setWaterArmyEnabled}
+          waterArmyCount={props.waterArmyCount}
+          setWaterArmyCount={props.setWaterArmyCount}
           // 单人分发：仅保留“时间窗口”，其余进阶参数按默认值即可。
           showMaxSelectedNodes={false}
           showAllowedPlatforms={false}
@@ -146,7 +187,11 @@ export function buildOptions(
     event_id: null,
     dispatch_mode: overrides.dispatch_mode,
     target_user_id: overrides.target_user_id ?? null,
+    single_target_mode: overrides.single_target_mode ?? "self_operate",
+    target_old_post_id: overrides.target_old_post_id ?? null,
     dispatch_platform: overrides.dispatch_platform ?? null,
     platform_specs: overrides.platform_specs ?? [],
+    water_army_enabled: props.waterArmyEnabled,
+    water_army_count: props.waterArmyEnabled ? props.waterArmyCount : 0,
   };
 }

@@ -80,10 +80,19 @@ class RunOptions(BaseModel):
     #   "cross_platform"  —— 跨平台并行分发（需指定 platform_specs 多平台同时选人）
     # 各模式的互斥校验集中在 ``_run_events_job`` 中按模式分流。
     dispatch_mode: Literal["single_target", "multi_user", "cross_platform"] = "multi_user"
-    # 单人定向分发：指定唯一数字人 user_id；多人分发下无效。
+    # 单人定向分发：指定唯一数字人 user_id（思路一=主发布节点 / 思路二=被 @ 的路人）；多人分发下无效。
     target_user_id: str | None = None
     # 多人分发指定平台：只从该平台已有的数字人中选人；空表示不限平台。
     dispatch_platform: str | None = None
+    # 单人定向的两种打法（仅 single_target 下生效）：
+    #   "self_operate" —— 思路一：指定数字人自运营闭环（默认）；
+    #   "attention"    —— 思路二：多数字人协同，全程 @ 指定路人（target_user_id）使其注意到事件。
+    single_target_mode: Literal["self_operate", "attention"] = "self_operate"
+    # 思路二中 @ 路人时引用的"旧帖编号"（直接假设路人有一条旧帖，仅用编号点名，不读取旧帖内容）。
+    target_old_post_id: str | None = None
+    # 白库水军参与：放大参与人数（仅点赞/转发，无文本），不计入 max_selected_nodes 上限。
+    water_army_enabled: bool = False
+    water_army_count: int = Field(default=0, ge=0, le=300)
     # 跨平台并行分发：每个平台独立的人数配置；至少 1 个平台。
     platform_specs: list[PlatformSpec] = Field(default_factory=list)
 
@@ -358,13 +367,14 @@ def create_app() -> FastAPI:
         if not event_text or not event_text.strip():
             raise HTTPException(status_code=400, detail="event_text 不能为空。")
 
+        has_image = image is not None and getattr(image, "filename", "")
         status = _create_run(
-            mode="text",
+            mode="image" if has_image else "text",
             total=1,
             dispatch_mode=parsed_options.dispatch_mode,
         )
         image_path: Path | None = None
-        if image is not None and getattr(image, "filename", ""):
+        if has_image:
             suffix = Path(image.filename or "").suffix.lower()
             if suffix not in SUPPORTED_IMAGE_SUFFIXES:
                 raise HTTPException(
@@ -680,6 +690,18 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail=f"Result not found: {event_id}")
         return FileResponse(output_path, filename=output_path.name, media_type="application/json")
 
+    @app.get("/api/runs/{run_id}/image")
+    def serve_run_image(run_id: str) -> FileResponse:
+        """返回本次运行上传的识别原图（纯图 / 图文任务都会落到 uploads/input.*）。"""
+        run_dir = _run_dir(run_id)
+        upload_dir = run_dir / "uploads"
+        if upload_dir.is_dir():
+            for suffix in SUPPORTED_IMAGE_SUFFIXES:
+                candidate = upload_dir / f"input{suffix}"
+                if candidate.is_file():
+                    return FileResponse(candidate)
+        raise HTTPException(status_code=404, detail="no image for this run")
+
     if FRONTEND_DIST.exists():
         app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
 
@@ -841,6 +863,7 @@ def _run_job_wrapper(run_id: str, job: Any) -> None:
 def _run_image_job(*, run_id: str, image_path: Path, options: RunOptions) -> None:
     _update_status(run_id, current_event_id="image_recognition")
     reference_events = load_hot_events(DEFAULT_EVENTS_PATH)
+    t0 = time.perf_counter()
     events = load_image_events(
         image=image_path,
         image_dir=None,
@@ -850,6 +873,11 @@ def _run_image_job(*, run_id: str, image_path: Path, options: RunOptions) -> Non
         event_id=options.event_id,
         use_llm=options.use_llm,
     )
+    ocr_seconds = time.perf_counter() - t0
+    for ev in events:
+        meta = ev.get("image_recognition")
+        if isinstance(meta, dict):
+            meta["ocr_seconds"] = round(ocr_seconds, 3)
     _update_status(run_id, total=len(events))
     _run_events_job(run_id=run_id, events=events, options=options)
 
@@ -886,18 +914,29 @@ def _run_text_image_job(
     """文字 + 可选图片：OCR 融合后走与纯文本完全相同的事件解析与下游流程。"""
 
     _update_status(run_id, current_event_id="image_recognition")
+    t0 = time.perf_counter()
     try:
         combined_text = _fuse_text_and_ocr(event_text, image_path)
     except Exception as exc:  # OCR 异常不应让整次运行崩溃，降级为仅用文字
         combined_text = (event_text or "").strip()
         if not combined_text:
             raise ValueError(f"文字输入为空且图片识别失败：{exc}") from exc
+        ocr_seconds = None
+    else:
+        ocr_seconds = time.perf_counter() - t0
     _update_status(run_id, current_event_id=None)
 
     if not combined_text.strip():
         raise ValueError("文字输入与图片识别结果均为空，无法构建事件。")
     request = TextRunRequest(event_text=combined_text, options=options)
     event = _event_from_text_request(request)
+    if image_path is not None:
+        event["source_type"] = "image"
+        event["source_image"] = str(image_path)
+        event["image_recognition"] = {
+            "method": "ocr_local",
+            "ocr_seconds": round(ocr_seconds, 3) if ocr_seconds is not None else None,
+        }
     _run_events_job(run_id=run_id, events=[event], options=options)
 
 
@@ -1016,6 +1055,10 @@ def _run_events_job(*, run_id: str, events: list[dict[str, Any]], options: RunOp
                     dispatch_platform=options.dispatch_platform
                     if options.dispatch_mode == "multi_user"
                     else None,
+                    single_target_mode=options.single_target_mode,
+                    target_old_post_id=options.target_old_post_id,
+                    water_army_enabled=options.water_army_enabled,
+                    water_army_count=options.water_army_count,
                 )
             _append_result(
                 run_id,
@@ -1094,14 +1137,24 @@ def _result_summary(
         return summary
 
     if dispatch_mode == "single_target":
-        diagnostic = payload.get("定向分发诊断")
+        diagnostic = payload.get("定向分发诊断") or payload.get("数字人注意诊断")
         if isinstance(diagnostic, dict):
             summary["target_dispatch"] = {
                 "target_user_id": diagnostic.get("target_user_id"),
+                "target_user_name": diagnostic.get("target_user_name"),
                 "target_platform": diagnostic.get("target_platform"),
                 "target_role": diagnostic.get("target_role"),
-                "warnings": diagnostic.get("warnings") or [],
+                "target_old_post_id": diagnostic.get("target_old_post_id"),
+                "warnings": diagnostic.get("warnings") or diagnostic.get("target_warning") or [],
             }
+    support_block = payload.get("特殊支持节点")
+    if isinstance(support_block, dict):
+        summary["support_nodes"] = {
+            "enabled": support_block.get("enabled"),
+            "count": support_block.get("count"),
+            "platforms": support_block.get("platforms"),
+            "core_actor_count": support_block.get("core_actor_count"),
+        }
     return summary
 
 

@@ -67,6 +67,11 @@ class DataLoader:
     def enriched_profile_path(self) -> Path:
         return self.derived_dir / f"{self.product_name}_profile_with_neighbors.graph.anon"
 
+    @property
+    def water_army_profile_path(self) -> Path:
+        """低活跃度"白库"水军库（合成账号），与 profiles 平级、独立文件。"""
+        return self.raw_dir / f"{self.product_name}_water_army.json"
+
     def _preferred_profile_path(self) -> Path:
         if self.platform_enriched_profile_path.exists():
             return self.platform_enriched_profile_path
@@ -139,6 +144,25 @@ class DataLoader:
             item = dict(raw_profile)
             item["user_id"] = str(item.get("user_id", user_id))
             item["user_name"] = item.get("user_name") or f"user_{user_id}"
+            result[str(user_id)] = UserProfile.model_validate(item)
+        return result
+
+    def load_water_army_profiles(self, limit: int | None = None) -> dict[str, UserProfile]:
+        """读取白库水军档案；文件不存在时返回空字典（调用方按"无可用水军"处理）。"""
+        path = self.water_army_profile_path
+        if not path.exists():
+            return {}
+        payload = self._read_json(path)
+        if not isinstance(payload, dict):
+            raise ValueError("Water army profile file must contain a JSON object.")
+        result: dict[str, UserProfile] = {}
+        for index, (user_id, raw_profile) in enumerate(payload.items()):
+            if limit is not None and index >= limit:
+                break
+            item = dict(raw_profile)
+            item["user_id"] = str(item.get("user_id", user_id))
+            item["user_name"] = item.get("user_name") or f"water_{user_id}"
+            item["is_water_army"] = True
             result[str(user_id)] = UserProfile.model_validate(item)
         return result
 

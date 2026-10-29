@@ -136,6 +136,10 @@ export function CrossPlatformScenario(props: SharedScenarioProps) {
           setProfileLimit={props.setProfileLimit}
           allowedPlatforms={props.allowedPlatforms}
           setAllowedPlatforms={props.setAllowedPlatforms}
+          waterArmyEnabled={props.waterArmyEnabled}
+          setWaterArmyEnabled={props.setWaterArmyEnabled}
+          waterArmyCount={props.waterArmyCount}
+          setWaterArmyCount={props.setWaterArmyCount}
           // 跨平台：每个平台独立 requested_count（已在专属参数里配置），
           // 进阶参数（风险等级 / 频率上限 / Profile 限制）保持默认值，不在此暴露。
           showMaxSelectedNodes={false}

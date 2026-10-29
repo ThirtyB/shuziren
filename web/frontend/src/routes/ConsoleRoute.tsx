@@ -14,6 +14,7 @@ import { DEFAULT_ALLOWED_PLATFORMS } from "../lib/platforms";
 import { Topbar } from "../components/Topbar";
 import { StatusPanel } from "../components/StatusPanel";
 import { ResultPanel } from "../components/ResultPanel";
+import { HistorySidebar } from "../components/HistorySidebar";
 import { SystemEventPicker } from "../components/SystemEventPicker";
 import { ImageEventForm } from "../components/ImageEventForm";
 import { SingleTargetScenario } from "../scenarios/SingleTargetScenario";
@@ -47,6 +48,9 @@ export default function ConsoleRoute() {
   const [campaignWindowHours, setCampaignWindowHours] = useState(24);
   const [maxFrequencyPerDay, setMaxFrequencyPerDay] = useState(3);
   const [allowedPlatforms, setAllowedPlatforms] = useState(DEFAULT_ALLOWED_PLATFORMS);
+  // 特殊支持节点参与：放大参与人数（仅点赞/转发，不计入选人上限）。
+  const [waterArmyEnabled, setWaterArmyEnabled] = useState(false);
+  const [waterArmyCount, setWaterArmyCount] = useState(10);
   const [useLlm, setUseLlm] = useState(true);
 
   // 场景
@@ -102,6 +106,8 @@ export default function ConsoleRoute() {
   const [activeRunId, setActiveRunId] = useState("");
   const [latestRunId, setLatestRunId] = useState("");
   const [refreshTick, setRefreshTick] = useState(0);
+  // 运行历史侧边栏：常态隐藏，点顶栏「运行历史」展开。
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   // 自动选第一条结果加载详情；运行完成（state 变化）或切换 history 时都会补加载，
   // 避免「run 有结果但 detail 一直为空」导致面板只显示「选择一个结果查看详情」。
@@ -295,6 +301,10 @@ export default function ConsoleRoute() {
     setMaxFrequencyPerDay,
     allowedPlatforms,
     setAllowedPlatforms,
+    waterArmyEnabled,
+    setWaterArmyEnabled,
+    waterArmyCount,
+    setWaterArmyCount,
     useLlm,
     isRunning,
     submit: runViaSource,
@@ -310,6 +320,8 @@ export default function ConsoleRoute() {
         refresh={refreshRun}
         hasRun={!!run?.run_id}
         subtitle={subtitle}
+        onToggleHistory={() => setSidebarOpen((value) => !value)}
+        historyOpen={sidebarOpen}
       />
 
       <main className="workspace-grid">
@@ -384,12 +396,6 @@ export default function ConsoleRoute() {
             setSelectedEventId(eventId);
             if (run?.run_id) void loadDetail(run.run_id, eventId);
           }}
-          history={{
-            activeRunId,
-            refreshTick,
-            onSelectRun: handleSelectHistory,
-            onAfterDelete: handleAfterDelete,
-          }}
         />
 
         <ResultPanel
@@ -401,6 +407,15 @@ export default function ConsoleRoute() {
           loading={loadingDetail}
         />
       </main>
+
+      <HistorySidebar
+        open={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
+        activeRunId={activeRunId}
+        refreshTick={refreshTick}
+        onSelectRun={handleSelectHistory}
+        onAfterDelete={handleAfterDelete}
+      />
     </div>
   );
 }

@@ -32,6 +32,9 @@ export default function TestingRoute() {
   const [campaignWindowHours, setCampaignWindowHours] = useState(24);
   const [maxFrequencyPerDay, setMaxFrequencyPerDay] = useState(3);
   const [allowedPlatforms, setAllowedPlatforms] = useState(DEFAULT_ALLOWED_PLATFORMS);
+  // 特殊支持节点参与：放大参与人数（仅点赞/转发，不计入选人上限）。
+  const [waterArmyEnabled, setWaterArmyEnabled] = useState(false);
+  const [waterArmyCount, setWaterArmyCount] = useState(10);
   const [useLlm, setUseLlm] = useState(true);
 
   // 测试历史 / 详情状态
@@ -124,6 +127,10 @@ export default function TestingRoute() {
     setMaxFrequencyPerDay,
     allowedPlatforms,
     setAllowedPlatforms,
+    waterArmyEnabled,
+    setWaterArmyEnabled,
+    waterArmyCount,
+    setWaterArmyCount,
     useLlm,
     // 压测是异步任务，按钮不由"是否有任务在跑"驱动 —— 允许连续提交排队。
     isRunning: false,

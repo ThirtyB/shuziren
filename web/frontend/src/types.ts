@@ -124,6 +124,13 @@ export type RunOptions = {
   dispatch_mode: DispatchMode;
   target_user_id?: string | null;
   dispatch_platform?: string | null;
+  // 单人定向两种打法：self_operate=思路一（自运营闭环）/ attention=思路二（多数字人 @ 指定路人）。
+  single_target_mode?: "self_operate" | "attention";
+  // 思路二中 @ 路人引用的旧帖编号（可选；后端默认 POST-0001）。
+  target_old_post_id?: string | null;
+  // 特殊支持节点参与：放大参与人数（仅点赞/转发，无文本），不计入选人上限。
+  water_army_enabled?: boolean;
+  water_army_count?: number;
   platform_specs: PlatformSpecPayload[];
   use_llm: boolean;
   event_limit?: number | null;

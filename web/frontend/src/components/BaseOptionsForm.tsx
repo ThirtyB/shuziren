@@ -17,6 +17,13 @@ export type BaseOptionsFormProps = {
   setProfileLimit: (value: string) => void;
   allowedPlatforms: string;
   setAllowedPlatforms: (value: string) => void;
+  /** 特殊支持节点参与开关与数量（所有分发模式共用）。 */
+  waterArmyEnabled: boolean;
+  setWaterArmyEnabled: (value: boolean) => void;
+  waterArmyCount: number;
+  setWaterArmyCount: (value: number) => void;
+  /** 是否渲染"特殊支持节点参与"开关；默认 true。 */
+  showWaterArmy?: boolean;
   /** 是否渲染"主选数量"输入；单/跨平台场景下隐藏。默认 true。 */
   showMaxSelectedNodes?: boolean;
   /** 是否渲染"候选人平台"复选框；单/多/跨平台场景下都隐藏（各自从目标
@@ -60,6 +67,11 @@ export function BaseOptionsForm(props: BaseOptionsFormProps) {
     setProfileLimit,
     allowedPlatforms,
     setAllowedPlatforms,
+    waterArmyEnabled,
+    setWaterArmyEnabled,
+    waterArmyCount,
+    setWaterArmyCount,
+    showWaterArmy = true,
     showMaxSelectedNodes = true,
     showAllowedPlatforms = true,
     showAdvancedOptions = true,
@@ -143,6 +155,30 @@ export function BaseOptionsForm(props: BaseOptionsFormProps) {
               </span>
             ))}
           </span>
+        </label>
+      )}
+      {showWaterArmy && (
+        <label className="wide">
+          <span className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={waterArmyEnabled}
+              onChange={(event) => setWaterArmyEnabled(event.target.checked)}
+            />
+            特殊支持节点参与（仅点赞 / 转发，不计入选人上限）
+          </span>
+          {waterArmyEnabled && (
+            <span className="water-army-count">
+              支持节点数量
+              <input
+                type="number"
+                min={0}
+                max={300}
+                value={waterArmyCount}
+                onChange={(event) => setWaterArmyCount(Number(event.target.value))}
+              />
+            </span>
+          )}
         </label>
       )}
     </div>

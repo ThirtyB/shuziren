@@ -68,6 +68,17 @@ class StrategyGenerator:
             )
             for node in selection_result.fallback_nodes
         ]
+        # 白库水军：转为策略层节点（不参与角色编排，仅供后续点赞/转发动作使用）。
+        water_army_nodes = [
+            self._build_node_plan(
+                node=node,
+                time_plan=time_plan,
+                frequency_plan=frequency_plan,
+                content_plan=content_plan,
+                bucket="primary",
+            )
+            for node in selection_result.water_army_nodes
+        ]
         stage_plans = self._build_stage_plans(
             selected_nodes=selected_nodes,
             time_plan=time_plan,
@@ -137,6 +148,7 @@ class StrategyGenerator:
             stage_plans=stage_plans,
             selected_nodes=selected_nodes,
             fallback_nodes=fallback_nodes,
+            water_army_nodes=water_army_nodes,
             strategy=strategy,
         )
 
@@ -177,26 +189,25 @@ class StrategyGenerator:
     def _build_time_plan(self, campaign_window_hours: int) -> dict[str, str]:
         total_hours = max(int(campaign_window_hours), 1)
 
-        # 四个时期按 0.1 / 0.2 / 0.4 / 0.3 首尾相接铺满整个窗口：
-        #   首发 T0~0.1H → 互动 0.1H~0.3H → 扩散 0.3H~0.7H → 支持 0.7H~H
-        # 旧实现里 support 与 engage 共用同一时间窗（都是 launch_end~engage_end），
-        # 支持没有独立时段；这里拆成四段各自独立。
+        # 四个时期按 0.30 / 0.20 / 0.20 / 0.30 首尾相接铺满整个窗口：
+        #   节点激活 T0~0.30H → 信息扩散 0.30H~0.50H → 影响力强化 0.50H~0.70H → 共识形成 0.70H~H
+        # 节点激活时期合并原首发期 + 互动期。
         if total_hours < 4:
             # 窗口太短，四段无法各占 1 小时，退化为顺序排开
-            launch_end = 1
-            engage_end = min(total_hours, 2)
-            amplify_end = min(total_hours, 3)
+            activation_end = 1
+            info_end = min(total_hours, 2)
+            influence_end = min(total_hours, 3)
         else:
             # 每段至少 1 小时，同时给后面每段至少留 1 小时，保证严格递增不越界
-            launch_end = min(max(round(total_hours * 0.10), 1), total_hours - 3)
-            engage_end = min(max(round(total_hours * 0.30), launch_end + 1), total_hours - 2)
-            amplify_end = min(max(round(total_hours * 0.70), engage_end + 1), total_hours - 1)
+            activation_end = min(max(round(total_hours * 0.30), 1), total_hours - 3)
+            info_end = min(max(round(total_hours * 0.50), activation_end + 1), total_hours - 2)
+            influence_end = min(max(round(total_hours * 0.70), info_end + 1), total_hours - 1)
 
         return {
-            "stage_1_launch": f"T0 - T+{launch_end}h",
-            "stage_2_engage": f"T+{launch_end}h - T+{engage_end}h",
-            "stage_3_amplify": f"T+{engage_end}h - T+{amplify_end}h",
-            "stage_2_support": f"T+{amplify_end}h - T+{total_hours}h",
+            "stage_node_activation": f"T0 - T+{activation_end}h",
+            "stage_info_diffusion": f"T+{activation_end}h - T+{info_end}h",
+            "stage_influence": f"T+{info_end}h - T+{influence_end}h",
+            "stage_consensus": f"T+{influence_end}h - T+{total_hours}h",
         }
 
     def _build_frequency_plan(
@@ -407,14 +418,14 @@ class StrategyGenerator:
         target_goal: str,
     ) -> list[StrategyStagePlan]:
         stage_specs = {
-            "stage_1_launch": ("启动期", "建立首轮叙事锚点并完成首发触达。"),
-            "stage_2_engage": ("互动期", "承接评论与问答，提升讨论深度与反馈回收。"),
-            "stage_2_support": ("支持期", "补充背景与长尾内容，稳定讨论连续性。"),
-            "stage_3_amplify": ("扩散期", "推动二次传播，扩展外圈覆盖范围。"),
+            "stage_node_activation": ("节点激活时期", "建立首轮叙事锚点并完成首发触达，同时承接评论与问答、回收互动反馈。"),
+            "stage_info_diffusion": ("信息扩散时期", "推动第一次扩散，扩展外圈覆盖范围。"),
+            "stage_influence": ("影响力强化阶段", "推动第二次扩散，进一步放大声量与触达。"),
+            "stage_consensus": ("共识形成阶段", "补充背景与长尾内容，稳定讨论连续性。"),
         }
 
         result: list[StrategyStagePlan] = []
-        for stage_name in ("stage_1_launch", "stage_2_engage", "stage_2_support", "stage_3_amplify"):
+        for stage_name in ("stage_node_activation", "stage_info_diffusion", "stage_influence", "stage_consensus"):
             nodes = [node for node in selected_nodes if node.dispatch_stage == stage_name]
             if not nodes:
                 continue
@@ -454,7 +465,7 @@ class StrategyGenerator:
             ]
         else:
             fallback_trigger = [
-                "stage_1_launch 未按计划执行时，启用前 1-2 个 fallback 节点补位",
+                "节点激活时期未按计划执行时，启用前 1-2 个 fallback 节点补位",
                 "评论区出现明显负向升级时，暂停 amplification 节点并回到 interaction_response 节点",
             ]
             if manual_review_node_ids:
@@ -465,7 +476,7 @@ class StrategyGenerator:
             "避免同一批节点在短时间内重复触发相同内容",
         ]
         if selected_nodes:
-            notes.append("优先观察 stage_1_launch 的首轮反馈，再决定是否扩大扩散范围")
+            notes.append("优先观察节点激活时期的首轮反馈，再决定是否扩大扩散范围")
         if manual_review_node_ids:
             notes.append(f"需人工复核节点={','.join(manual_review_node_ids)}")
         if selection_result.event.constraints.risk_level == "high":
@@ -594,19 +605,19 @@ class StrategyGenerator:
         return mapping.get(selected_role, content_plan.support_node)
 
     def _stage_content_focus(self, stage_name: str, target_goal: str) -> str:
-        if stage_name == "stage_1_launch":
-            return "首发主信息、核心观点和初始讨论锚点。"
-        if stage_name in {"stage_2_engage", "stage_2_support"} and target_goal == "response":
+        if stage_name == "stage_node_activation" and target_goal == "response":
             return "回应高频问题、纠正误读并稳定讨论节奏。"
-        if stage_name in {"stage_2_engage", "stage_2_support"}:
-            return "回收互动反馈、引导追问并补充案例。"
+        if stage_name == "stage_node_activation":
+            return "首发主信息、核心观点和初始讨论锚点；并回收互动反馈、引导追问并补充案例。"
+        if stage_name == "stage_consensus":
+            return "补充背景与长尾内容，稳定讨论连续性。"
         return "提炼亮点并推动二次传播，扩大外圈触达。"
 
     def _stage_success_signal(self, stage_name: str, target_goal: str) -> str:
-        if stage_name == "stage_1_launch":
-            return "核心信息被稳定引用，首轮触达完成。"
-        if stage_name in {"stage_2_engage", "stage_2_support"} and target_goal == "response":
+        if stage_name == "stage_node_activation" and target_goal == "response":
             return "高频疑问得到收敛，负向升级得到控制。"
-        if stage_name in {"stage_2_engage", "stage_2_support"}:
-            return "评论、问答或讨论深度明显提升。"
+        if stage_name == "stage_node_activation":
+            return "核心信息被稳定引用，首轮触达完成，讨论深度明显提升。"
+        if stage_name == "stage_consensus":
+            return "讨论连续性稳定，长尾内容补充到位。"
         return "二次扩散持续发生，外圈用户开始跟进。"

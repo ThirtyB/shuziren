@@ -41,6 +41,7 @@ export function RunHistoryPanel({
   refreshTick,
   onAfterDelete,
   inline = false,
+  embedded = false,
 }: {
   activeRunId: string;
   onSelectRun: (entry: RunHistoryEntry) => void;
@@ -50,6 +51,8 @@ export function RunHistoryPanel({
   onAfterDelete?: (deletedRunId: string, remaining: RunHistoryEntry[]) => void;
   /** true 时始终展开（用于内嵌在 StatusPanel 顶部）。 */
   inline?: boolean;
+  /** true 时去掉自身头部，作为侧边栏内容嵌入（刷新按钮单独提供）。 */
+  embedded?: boolean;
 }) {
   const [items, setItems] = useState<RunHistoryEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -130,6 +133,11 @@ export function RunHistoryPanel({
               >
                 <span className={`state-dot state-${item.state}`} aria-hidden />
                 <span className="run-history-id">{item.run_id}</span>
+                {item.mode === "image" && (
+                  <span className="run-history-badge" title="含图识别任务">
+                    图
+                  </span>
+                )}
                 <span className="run-history-mode">{DISPATCH_LABEL[item.dispatch_mode]}</span>
                 <span className="run-history-progress">
                   {item.completed + item.failed}/{item.total}
@@ -167,6 +175,32 @@ export function RunHistoryPanel({
 
   if (inline) {
     return <div className="run-history run-history-inline">{body}</div>;
+  }
+
+  if (embedded) {
+    return (
+      <div className="run-history run-history-embedded">
+        <div className="run-history-toolbar">
+          <span
+            role="button"
+            tabIndex={0}
+            aria-label="刷新历史"
+            title="刷新历史"
+            className="run-history-refresh"
+            onClick={() => setManualTick((value) => value + 1)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                setManualTick((value) => value + 1);
+              }
+            }}
+          >
+            <RefreshCcw size={14} className={loading ? "spin" : ""} />
+          </span>
+        </div>
+        {body}
+      </div>
+    );
   }
 
   return (

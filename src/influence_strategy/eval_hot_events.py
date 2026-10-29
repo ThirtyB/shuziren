@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
 import logging
@@ -902,6 +903,11 @@ def _run_hot_event_multiplatform_evaluation(
             overview["平台级错误"] = errors
     stage_times["aggregate"] = time.perf_counter() - t0
 
+    # 图识别耗时：由上游 image/text-image 任务写入事件元数据，这里并入模块耗时。
+    ocr_meta = hot_event.get("image_recognition")
+    if isinstance(ocr_meta, dict) and ocr_meta.get("ocr_seconds") is not None:
+        stage_times["image_recognition"] = float(ocr_meta["ocr_seconds"])
+
     target_dir = Path(output_dir)
     output_path = (
         target_dir
@@ -1022,6 +1028,8 @@ def build_eval_output(
     llm_client: Any | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     selected_nodes = strategy_result.selected_nodes
+    water_army_nodes = list(strategy_result.water_army_nodes)
+    # 核心发布节点的选人 id 组（特殊支持节点单独成块，不混入此处）。
     selected_ids = [node.user_id for node in selected_nodes]
     platform = strategy_result.strategy.platform_plan.primary_platform
     # 对外输出统一使用数据集口径（如 instagram_simulated），避免同一个 JSON 里
@@ -1049,7 +1057,7 @@ def build_eval_output(
 
     selection_summary = strategy_result.selection_summary
     if selection_summary.selection_mode == "targeted":
-        # 单人分发：唯一数字人作为主发布节点，按四时期做自运营闭环
+        # 单人分发（思路一）：唯一数字人作为主发布节点，按四时期做自运营闭环
         # （首发期发布→互动期自赞→扩散期自转发→支持期自赞并再发承接帖）。
         node_outputs, post_refs, _ = _build_single_user_node_outputs(
             strategy_result=strategy_result,
@@ -1058,7 +1066,29 @@ def build_eval_output(
             hot_event=hot_event,
             variants=variants,
             llm_overrides=llm_overrides,
+            water_army_nodes=water_army_nodes,
             workspace_root=workspace_root,
+        )
+    elif selection_summary.selection_mode == "attention":
+        # 单人定向（思路二 / 数字人注意）：多数字人协同，全程 @ 指定路人（被动、不反应），
+        # 使其注意到事件。被点名的路人来自 selection_summary，仅作为帖文 @ 内容，不分配动作。
+        attention_target: dict[str, Any] | None = None
+        if selection_summary.target_user_id:
+            attention_target = {
+                "user_id": selection_summary.target_user_id,
+                "user_name": selection_summary.target_user_name,
+                "old_post_id": selection_summary.target_old_post_id,
+            }
+        node_outputs, post_refs, _ = _build_staged_node_outputs(
+            strategy_result=strategy_result,
+            selected_nodes=selected_nodes,
+            platform=output_platform,
+            hot_event=hot_event,
+            variants=variants,
+            llm_overrides=llm_overrides,
+            workspace_root=workspace_root,
+            attention_target=attention_target,
+            water_army_nodes=water_army_nodes,
         )
     else:
         # 多人 / 跨平台协同：按「首发期 → 互动期 → 扩散期 → 支持期」编排，动作只有
@@ -1070,6 +1100,7 @@ def build_eval_output(
             hot_event=hot_event,
             variants=variants,
             llm_overrides=llm_overrides,
+            water_army_nodes=water_army_nodes,
             workspace_root=workspace_root,
         )
 
@@ -1100,6 +1131,39 @@ def build_eval_output(
             "target_final_score": selection_summary.target_final_score,
             "target_topic_match_score": selection_summary.target_topic_match_score,
             "target_warning": list(selection_summary.target_warning),
+        }
+    elif selection_summary.selection_mode == "attention":
+        payload["数字人注意诊断"] = {
+            "selection_mode": "attention",
+            "target_user_id": selection_summary.target_user_id,
+            "target_user_name": selection_summary.target_user_name,
+            "target_platform": selection_summary.target_platform,
+            "target_old_post_id": selection_summary.target_old_post_id,
+            "actor_count": len(selected_nodes),
+            "note": "多数字人协同 @ 指定路人（被动、不反应），使其注意到事件；@ 仅作为帖文内容。",
+        }
+
+    if water_army_nodes:
+        # 特殊支持节点：独立于核心发布节点，单独呈现其选人信息与自身行动清单。
+        payload["特殊支持节点"] = {
+            "enabled": selection_summary.water_army_enabled,
+            "count": selection_summary.water_army_count,
+            "platforms": selection_summary.water_army_platforms,
+            "core_actor_count": len(selected_nodes),
+            "selection": [
+                {"user_id": n.user_id, "platform": n.platform, "risk_level": n.risk_level}
+                for n in water_army_nodes
+            ],
+            "nodes": [
+                {
+                    "user_id": n.user_id,
+                    "platform": n.platform,
+                    "risk_level": n.risk_level,
+                    "actions": (node_outputs.get(f"id{n.user_id}", {}) or {}).get("动作清单", []),
+                }
+                for n in water_army_nodes
+            ],
+            "note": "特殊支持节点仅做点赞 / 转发（无文本）以放大参与人数，不计入选人上限，不与核心发布混排。",
         }
 
     # 主选为空时，把策略整体状态写到 payload 顶层，避免消费者误以为
@@ -1157,12 +1221,13 @@ ARSENAL_MIN_SCORE = 0.30
 #: 取消点赞的概率：风险越高越倾向放弃这一次点赞（保守发声）。
 LIKE_SKIP_PROBABILITY = {"low": 0.10, "medium": 0.20, "high": 0.35}
 
-#: 执行阶段 → 时期显示名（与 ``StrategyGenerator._build_time_plan`` 四段对应）。
+#: 时期键 → 时期显示名（与 ``StrategyGenerator._build_time_plan`` 四段对应）。
+#: 节点激活时期合并原首发期 + 互动期；信息扩散时期 = 扩散一；影响力强化阶段 = 扩散二；共识形成阶段 = 支持期。
 STAGE_LABELS = {
-    "stage_1_launch": "首发期",
-    "stage_2_engage": "互动期",
-    "stage_3_amplify": "扩散期",
-    "stage_2_support": "支持期",
+    "stage_node_activation": "节点激活时期",
+    "stage_info_diffusion": "信息扩散时期",
+    "stage_influence": "影响力强化阶段",
+    "stage_consensus": "共识形成阶段",
 }
 
 #: 节点角色 → 中文显示名（数字人职责）。
@@ -1175,10 +1240,10 @@ ROLE_LABELS = {
 
 #: 节点角色 → 职责说明（一句话讲清这个人在传播链里干什么）。
 ROLE_RESPONSIBILITY = {
-    "core_publish_node": "首发期发布主帖，奠定舆论基调与核心叙事",
-    "interaction_response_node": "互动期评论 / 点赞首发帖，引导并承接讨论",
-    "amplification_node": "扩散期转发扩声量，推动二次传播",
-    "support_node": "支持期补充背景、转发扩散，承接并延续热度",
+    "core_publish_node": "节点激活时期发布主帖，奠定舆论基调与核心叙事",
+    "interaction_response_node": "节点激活时期评论 / 点赞首发帖，引导并承接讨论",
+    "amplification_node": "信息扩散时期转发扩声量，推动二次传播",
+    "support_node": "共识形成阶段补充背景、转发扩散，承接并延续热度",
 }
 
 #: 节点角色排序：给数字人分配统一编号（首发 → 互动 → 扩散 → 支持）时按此序。
@@ -1373,6 +1438,8 @@ def _build_staged_node_outputs(
     hot_event: dict[str, Any] | None = None,
     variants: list[str] | None = None,
     llm_overrides: dict[str, dict[str, str]] | None = None,
+    attention_target: dict[str, Any] | None = None,
+    water_army_nodes: list[StrategyNodePlan] | None = None,
     workspace_root: str | Path | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, str], dict[str, str]]:
     """多人协同（单平台）按四个时期编排动作。
@@ -1478,6 +1545,19 @@ def _build_staged_node_outputs(
             variants=variant_pool,
         )
 
+    def with_mention(text: str) -> str:
+        """思路二（数字人注意）：把被 @ 的路人写进帖文。
+
+        仅当 ``attention_target`` 非空时生效；其它模式原样返回。艾特是帖文内容，
+        不触发路人任何动作。旧帖编号直接拼接，不读取旧帖内容。
+        """
+        if attention_target is None:
+            return text
+        mention_name = attention_target.get("user_name") or attention_target.get("user_id") or "路人"
+        old_post_id = attention_target.get("old_post_id") or "POST-0001"
+        prefix = f"@{mention_name}（旧帖编号 {old_post_id}）"
+        return f"{prefix} {text}" if text else prefix
+
     # ① 首发期：每个首发节点发一次帖
     launch_posts: list[tuple[str, str, str, float]] = []
     for index, node in enumerate(launch_nodes, start=1):
@@ -1488,12 +1568,12 @@ def _build_staged_node_outputs(
         action = emit(
             node,
             ACTION_PUBLISH,
-            "stage_1_launch",
-            trigger="进入首发期后立即执行",
+            "stage_node_activation",
+            trigger="进入节点激活时期后立即执行",
             target=_post_target(ref, node.user_id, "本节点首发帖"),
             depends_on=[],
             creates={"post_ref": ref, "post_type": "anchor_post"},
-            payload={"正文草案": text, "弹药语义分": round(score, 4)},
+            payload={"正文草案": with_mention(text), "弹药语义分": round(score, 4)},
         )
         publish_action_ids[node.user_id] = action["动作编号"]
         launch_posts.append((node.user_id, ref, action["动作编号"], score))
@@ -1508,7 +1588,7 @@ def _build_staged_node_outputs(
             emit(
                 node,
                 ACTION_LIKE,
-                "stage_2_engage",
+                "stage_node_activation",
                 trigger="首发帖出现后执行",
                 target=_post_target(ref, owner_id, f"数字人 {owner_id} 的首发帖"),
                 depends_on=[action_id],
@@ -1526,12 +1606,12 @@ def _build_staged_node_outputs(
             emit(
                 node,
                 ACTION_COMMENT,
-                "stage_2_engage",
+                "stage_node_activation",
                 trigger="首发帖发布后跟进评论",
                 target=_post_target(ref, owner_id, f"数字人 {owner_id} 的首发帖"),
                 depends_on=[action_id],
                 creates={"comment_ref": f"C{len(actions_by_node[node.user_id]):03d}"},
-                payload={"评论内容": text, "弹药语义分": round(score, 4)},
+                payload={"评论内容": with_mention(text), "弹药语义分": round(score, 4)},
             )
 
     # ③ 扩散期：扩散节点转发（一次扩散），优先转发语义分最高的首发帖
@@ -1543,18 +1623,19 @@ def _build_staged_node_outputs(
         owner_id, src_ref, src_action, _score = ranked_launch[(index - 1) % len(ranked_launch)]
         text, score = ammo()[0]
         ref = f"R{index:03d}"
+        repost_text = with_mention(text)
         action = emit(
             node,
             ACTION_REPOST,
-            "stage_3_amplify",
-            trigger="进入扩散期后执行第一次扩散",
+            "stage_info_diffusion",
+            trigger="进入信息扩散时期后执行第一次扩散",
             target=_post_target(src_ref, owner_id, f"数字人 {owner_id} 的首发帖"),
             depends_on=[src_action],
             creates={"post_ref": ref, "post_type": "repost"},
             payload={
-                "转发文案": text,
+                "转发文案": repost_text,
                 "原文post_ref": src_ref,
-                "文案留空": not text,
+                "文案留空": not repost_text,
                 "弹药语义分": round(score, 4),
             },
         )
@@ -1569,8 +1650,8 @@ def _build_staged_node_outputs(
             emit(
                 node,
                 ACTION_LIKE,
-                "stage_3_amplify",
-                trigger="一次扩散转发出现后执行",
+                "stage_info_diffusion",
+                trigger="信息扩散时期转发出现后执行",
                 target=_post_target(ref, owner_id, f"数字人 {owner_id} 的转发帖"),
                 depends_on=[action_id],
                 creates={},
@@ -1587,8 +1668,8 @@ def _build_staged_node_outputs(
         action = emit(
             node,
             ACTION_REPOST,
-            "stage_3_amplify",
-            trigger="扩散期内完成第二次扩散",
+            "stage_influence",
+            trigger="影响力强化阶段完成第二次扩散",
             target=_post_target(src_ref, owner_id, f"数字人 {owner_id} 的转发帖"),
             depends_on=[src_action],
             creates={"post_ref": ref, "post_type": "repost"},
@@ -1605,8 +1686,8 @@ def _build_staged_node_outputs(
             emit(
                 node,
                 ACTION_LIKE,
-                "stage_3_amplify",
-                trigger="二次扩散转发出现后执行",
+                "stage_influence",
+                trigger="影响力强化阶段转发出现后执行",
                 target=_post_target(ref, owner_id, f"数字人 {owner_id} 的转发帖"),
                 depends_on=[action_id],
                 creates={},
@@ -1614,6 +1695,7 @@ def _build_staged_node_outputs(
             )
 
     # ④ 支持期：互动节点以评论内容发帖，扩散 / 支持节点取弹药发帖
+    support_posts: list[tuple[str, str, str]] = []
     support_publishers = (
         [(node, comment_text_by_node.get(node.user_id, "")) for node in interact_nodes]
         + [(node, ammo()[0][0]) for node in amplify_nodes]
@@ -1625,15 +1707,30 @@ def _build_staged_node_outputs(
         action = emit(
             node,
             ACTION_PUBLISH,
-            "stage_2_support",
-            trigger="进入支持期后发布承接帖",
-            target=_post_target(ref, node.user_id, "本节点支持期发帖"),
+            "stage_consensus",
+            trigger="进入共识形成阶段后发布承接帖",
+            target=_post_target(ref, node.user_id, "本节点共识形成阶段发帖"),
             depends_on=[],
             creates={"post_ref": ref, "post_type": "support_post"},
-            payload={"正文草案": text, "来源": "互动评论" if node in interact_nodes else "弹药库"},
+            payload={"正文草案": with_mention(text), "来源": "互动评论" if node in interact_nodes else "弹药库"},
         )
         post_refs.setdefault(node.user_id, ref)
         publish_action_ids.setdefault(node.user_id, action["动作编号"])
+        support_posts.append((node.user_id, ref, action["动作编号"]))
+
+    # ④ 特殊支持节点：互动期广泛点赞、扩散1/扩散2按概率点赞或转发、支持期点赞。
+    if water_army_nodes:
+        support_map = _append_support_node_actions(
+            support_nodes=water_army_nodes,
+            platform=platform,
+            time_plan=time_plan,
+            interaction_targets=[(o, r, a) for o, r, a, _ in launch_posts],
+            repost1_targets=repost1,
+            repost2_targets=repost2,
+            support_targets=support_posts,
+        )
+        for wa_id, acts in support_map.items():
+            actions_by_node.setdefault(wa_id, []).extend(acts)
 
     node_outputs: dict[str, dict[str, Any]] = {}
     for index, node in enumerate(selected_nodes, start=1):
@@ -1663,6 +1760,27 @@ def _build_staged_node_outputs(
             },
             "post_ref": own_ref,
         }
+    for wa_node in (water_army_nodes or []):
+        acts = actions_by_node.get(wa_node.user_id, [])
+        if not acts:
+            continue
+        node_outputs[f"id{wa_node.user_id}"] = {
+            "时间阶段": "特殊支持节点",
+            "发帖平台": platform,
+            "发帖内容": "",
+            "动作清单": acts,
+            "动作统计": _count_actions(acts),
+            "执行约束": {
+                "节点角色": "special_support",
+                "执行阶段": "special_support",
+                "执行优先级": "p3",
+                "节点得分": round(wa_node.final_score, 6),
+                "风险等级": wa_node.risk_level,
+                "人工复核": wa_node.manual_review_required,
+                "风险标签": wa_node.risk_flags,
+            },
+            "post_ref": "",
+        }
     return node_outputs, post_refs, publish_action_ids
 
 
@@ -1674,6 +1792,7 @@ def _build_single_user_node_outputs(
     hot_event: dict[str, Any] | None = None,
     variants: list[str] | None = None,
     llm_overrides: dict[str, dict[str, str]] | None = None,
+    water_army_nodes: list[StrategyNodePlan] | None = None,
     workspace_root: str | Path | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, str], dict[str, str]]:
     """单人分发：唯一数字人作为主发布节点，按四时期做自运营闭环。
@@ -1772,8 +1891,8 @@ def _build_single_user_node_outputs(
     p_ref = "P001"
     pa = emit(
         ACTION_PUBLISH,
-        "stage_1_launch",
-        "进入首发期后立即执行",
+        "stage_node_activation",
+        "进入节点激活时期后立即执行",
         _publish_target(node=node, own_post_ref=p_ref, target_core_id=node.user_id, target_core_ref=p_ref),
         [],
         {"post_ref": p_ref, "post_type": "anchor_post"},
@@ -1783,7 +1902,7 @@ def _build_single_user_node_outputs(
     # ② 互动期：给自己的主帖点赞
     emit(
         ACTION_LIKE,
-        "stage_2_engage",
+        "stage_node_activation",
         "本人主帖发布后执行",
         _post_target(p_ref, node.user_id, "本人首发帖"),
         [pa["动作编号"]],
@@ -1796,8 +1915,8 @@ def _build_single_user_node_outputs(
     r_ref = "R001"
     ra = emit(
         ACTION_REPOST,
-        "stage_3_amplify",
-        "进入扩散期后转发本人主帖",
+        "stage_info_diffusion",
+        "进入信息扩散时期后转发本人主帖",
         _post_target(p_ref, node.user_id, "本人首发帖"),
         [pa["动作编号"]],
         {"post_ref": r_ref, "post_type": "repost"},
@@ -1812,7 +1931,7 @@ def _build_single_user_node_outputs(
     # ④ 支持期（第二个传播期）：给自己的转发点赞；并再发一篇承接帖（最后一个时期）
     emit(
         ACTION_LIKE,
-        "stage_2_support",
+        "stage_consensus",
         "本人转发出现后执行",
         _post_target(r_ref, node.user_id, "本人转发帖"),
         [ra["动作编号"]],
@@ -1822,10 +1941,10 @@ def _build_single_user_node_outputs(
     q_text, q_score = ammo()[0]
     q_text = text_or_fallback(q_text, 2)
     q_ref = "Q001"
-    emit(
+    qa = emit(
         ACTION_PUBLISH,
-        "stage_2_support",
-        "进入支持期后发布承接帖",
+        "stage_consensus",
+        "进入共识形成阶段后发布承接帖",
         _publish_target(node=node, own_post_ref=q_ref, target_core_id=node.user_id, target_core_ref=q_ref),
         [],
         {"post_ref": q_ref, "post_type": "support_post"},
@@ -1835,7 +1954,7 @@ def _build_single_user_node_outputs(
     node_outputs: dict[str, dict[str, Any]] = {}
     own_ref = p_ref
     node_outputs[f"id{node.user_id}"] = {
-        "时间阶段": "首发期 → 支持期（全程自运营）",
+        "时间阶段": "节点激活时期 → 共识形成阶段（全程自运营）",
         "发帖平台": platform,
         "发帖内容": next(
             (
@@ -1860,11 +1979,42 @@ def _build_single_user_node_outputs(
     }
     post_refs: dict[str, str] = {node.user_id: p_ref}
     publish_action_ids: dict[str, str] = {node.user_id: pa["动作编号"]}
+    if water_army_nodes:
+        support_map = _append_support_node_actions(
+            support_nodes=water_army_nodes,
+            platform=platform,
+            time_plan=time_plan,
+            interaction_targets=[(node.user_id, p_ref, pa["动作编号"])],
+            repost1_targets=[(node.user_id, r_ref, ra["动作编号"])],
+            repost2_targets=[],
+            support_targets=[(node.user_id, q_ref, qa["动作编号"])],
+        )
+        for wa_node in (water_army_nodes or []):
+            acts = support_map.get(wa_node.user_id, [])
+            if not acts:
+                continue
+            node_outputs[f"id{wa_node.user_id}"] = {
+                "时间阶段": "特殊支持节点",
+                "发帖平台": platform,
+                "发帖内容": "",
+                "动作清单": acts,
+                "动作统计": _count_actions(acts),
+                "执行约束": {
+                    "节点角色": "special_support",
+                    "执行阶段": "special_support",
+                    "执行优先级": "p3",
+                    "节点得分": round(wa_node.final_score, 6),
+                    "风险等级": wa_node.risk_level,
+                    "人工复核": wa_node.manual_review_required,
+                    "风险标签": wa_node.risk_flags,
+                },
+                "post_ref": "",
+            }
     return node_outputs, post_refs, publish_action_ids
 
 
 #: 四个时期的先后顺序——后端与前端都按这个顺序排，不用各自猜。
-STAGE_ORDER = ("stage_1_launch", "stage_2_engage", "stage_3_amplify", "stage_2_support")
+STAGE_ORDER = ("stage_node_activation", "stage_info_diffusion", "stage_influence", "stage_consensus")
 
 
 def _stage_windows(time_plan: dict[str, Any]) -> list[dict[str, str]]:
@@ -1985,9 +2135,13 @@ def _build_five_dimension_strategy(
         for node in selected_nodes
     }
     # 全量动作索引（含完整字段），用于把「依赖动作」解析成可读的指向对象。
+    # 仅纳入核心发布节点的动作；特殊支持节点的动作单独成块，不混入核心阶段统计。
+    core_ids = set(node_number)
     all_actions: list[dict[str, Any]] = []
     for node_output in node_outputs.values():
-        all_actions.extend(node_output.get("动作清单", []) or [])
+        for action in node_output.get("动作清单", []) or []:
+            if action.get("执行主体") in core_ids:
+                all_actions.append(action)
     action_index = {a.get("动作编号"): a for a in all_actions}
 
     # 活动窗口小时数：用于把动作数量换算成"条/天"。优先取事件约束里的窗口，
@@ -2033,7 +2187,7 @@ def _build_five_dimension_strategy(
             {
                 "数字人编号": node_number[node.user_id],
                 "数字人id": node.user_id,
-                "时间阶段": node_output.get("时间阶段", _stage_text(node)),
+                "角色": node_role_label[node.user_id],
             }
         )
         action_stats = node_output.get("动作统计")
@@ -2147,7 +2301,7 @@ def _build_five_dimension_strategy(
             "传播窗口": strategy_result.strategy.time_plan,
             "时期窗口": _stage_windows(strategy_result.strategy.time_plan),
             "阶段统计": _stage_statistics(all_actions, strategy_result.strategy.time_plan, node_number),
-            "数字人时间安排": time_plan,
+            "数字人角色": time_plan,
         },
         "频率": {
             "数字人频率": frequency_items,
@@ -2302,6 +2456,137 @@ def _post_target(post_ref: str, owner_id: str, target_label: str) -> dict[str, A
         "目标数字人id": owner_id,
         "目标说明": target_label,
     }
+
+
+def _support_repost_probability(risk_level: str) -> float:
+    """特殊支持节点：风险越低，点赞转转发的概率越高。"""
+    return {
+        "low": 0.5,
+        "medium": 0.25,
+        "high": 0.1,
+    }.get((risk_level or "").lower(), 0.25)
+
+
+def _append_support_node_actions(
+    *,
+    support_nodes: list[StrategyNodePlan],
+    platform: str,
+    time_plan: dict[str, Any],
+    interaction_targets: list[tuple[str, str, str]],
+    repost1_targets: list[tuple[str, str, str]],
+    repost2_targets: list[tuple[str, str, str]],
+    support_targets: list[tuple[str, str, str]],
+) -> dict[str, list[dict[str, Any]]]:
+    """特殊支持节点参与（不发布 / 不评论、无任何文本）：
+
+    - 互动期：对全部首发帖广泛点赞；
+    - 扩散1（一次扩散）：对第一次转发的帖点赞，按风险概率有几率变为转发（无文本）；
+    - 扩散2（二次扩散）：对第二次转发的帖点赞，同样按风险概率有几率变为转发；
+    - 支持期：对支持期发帖点赞。
+
+    点赞→转发的判定用确定性随机（按 user_id + 目标帖 做种子），保证同输入可复现。
+    返回 ``{user_id: [action, ...]}``；动作编号用 ``W`` 前缀，避免与正文编排的 ``A`` 系列冲突。
+    """
+    result: dict[str, list[dict[str, Any]]] = {}
+    if not support_nodes:
+        return result
+    counter = itertools.count(1)
+    activate_label = STAGE_LABELS.get("stage_node_activation", "节点激活时期")
+    diffuse_label = STAGE_LABELS.get("stage_info_diffusion", "信息扩散时期")
+    influence_label = STAGE_LABELS.get("stage_influence", "影响力强化阶段")
+    support_label = STAGE_LABELS.get("stage_consensus", "共识形成阶段")
+
+    def _like_or_repost(
+        *, owner_id: str, ref: str, action_id: str, stage_key: str, label: str, p: float
+    ) -> dict[str, Any]:
+        seq = next(counter)
+        # 确定性随机：同一（节点, 目标帖, 轮次）永远得到同一判定。
+        seed = int(hashlib.md5(f"{wa_node.user_id}|{ref}|{stage_key}".encode()).hexdigest(), 16)
+        if random.Random(seed).random() < p:
+            return _compact_action(
+                action_id=f"W{seq:04d}",
+                seq=seq,
+                actor_id=wa_node.user_id,
+                action_group=label,
+                action_type=ACTION_REPOST[0],
+                action_name=ACTION_REPOST[1],
+                platform=platform,
+                stage=f"{label} {time_plan.get(stage_key, '')}".strip(),
+                trigger_condition="特殊支持节点：点赞转为转发（无文本）",
+                target=_post_target(ref, owner_id, f"数字人 {owner_id} 的转发帖"),
+                depends_on=[action_id],
+                creates={"post_ref": f"WR{seq:04d}", "post_type": "repost"},
+                payload={"转发文案": "", "原文post_ref": ref, "文案留空": True},
+            )
+        return _compact_action(
+            action_id=f"W{seq:04d}",
+            seq=seq,
+            actor_id=wa_node.user_id,
+            action_group=label,
+            action_type=ACTION_LIKE[0],
+            action_name=ACTION_LIKE[1],
+            platform=platform,
+            stage=f"{label} {time_plan.get(stage_key, '')}".strip(),
+            trigger_condition="特殊支持节点：点赞以放大热度",
+            target=_post_target(ref, owner_id, f"数字人 {owner_id} 的转发帖"),
+            depends_on=[action_id],
+            creates={},
+            payload={"跳过原因": ""},
+        )
+
+    for wa_node in support_nodes:
+        actions: list[dict[str, Any]] = []
+        p = _support_repost_probability(wa_node.risk_level)
+        # 互动期：广泛点赞全部首发帖
+        for owner_id, ref, action_id in interaction_targets:
+            seq = next(counter)
+            actions.append(_compact_action(
+                action_id=f"W{seq:04d}",
+                seq=seq,
+                actor_id=wa_node.user_id,
+                action_group=activate_label,
+                action_type=ACTION_LIKE[0],
+                action_name=ACTION_LIKE[1],
+                platform=platform,
+                stage=f"{activate_label} {time_plan.get('stage_node_activation', '')}".strip(),
+                trigger_condition="特殊支持节点：节点激活时期点赞以放大热度",
+                target=_post_target(ref, owner_id, f"数字人 {owner_id} 的首发帖"),
+                depends_on=[action_id],
+                creates={},
+                payload={"跳过原因": ""},
+            ))
+        # 信息扩散时期：点赞第一次转发，按概率转为转发（无文本）
+        for owner_id, ref, action_id in repost1_targets:
+            actions.append(_like_or_repost(
+                owner_id=owner_id, ref=ref, action_id=action_id,
+                stage_key="stage_info_diffusion", label=diffuse_label, p=p,
+            ))
+        # 影响力强化阶段：点赞第二次转发，按概率转为转发（无文本）
+        for owner_id, ref, action_id in repost2_targets:
+            actions.append(_like_or_repost(
+                owner_id=owner_id, ref=ref, action_id=action_id,
+                stage_key="stage_influence", label=influence_label, p=p,
+            ))
+        # 支持期：点赞支持期发帖
+        for owner_id, ref, action_id in support_targets:
+            seq = next(counter)
+            actions.append(_compact_action(
+                action_id=f"W{seq:04d}",
+                seq=seq,
+                actor_id=wa_node.user_id,
+                action_group=support_label,
+                action_type=ACTION_LIKE[0],
+                action_name=ACTION_LIKE[1],
+                platform=platform,
+                stage=f"{support_label} {time_plan.get('stage_consensus', '')}".strip(),
+                trigger_condition="特殊支持节点：共识形成阶段点赞以放大热度",
+                target=_post_target(ref, owner_id, f"数字人 {owner_id} 的共识形成阶段发帖"),
+                depends_on=[action_id],
+                creates={},
+                payload={"跳过原因": ""},
+            ))
+        result[wa_node.user_id] = actions
+    return result
 
 
 def _persona_for_node(*, node: StrategyNodePlan, topic_labels: list[str]) -> str:
@@ -2740,6 +3025,10 @@ def _run_hot_event_evaluation(
     trace_dir: str | Path,
     target_user_id: str | None = None,
     dispatch_platform: str | None = None,
+    single_target_mode: str = "self_operate",
+    target_old_post_id: str | None = None,
+    water_army_enabled: bool = False,
+    water_army_count: int = 0,
     recall_size: int = 200,
     recall_mode: Literal["platform_aware"] = "platform_aware",
 ) -> tuple[Path, dict[str, Any], dict[str, float]]:
@@ -2786,6 +3075,10 @@ def _run_hot_event_evaluation(
         llm_client=client,
         target_user_id=target_user_id,
         dispatch_platform=dispatch_platform,
+        single_target_mode=single_target_mode,
+        target_old_post_id=target_old_post_id,
+        water_army_enabled=water_army_enabled,
+        water_army_count=water_army_count,
         recall_size=effective_recall_size,
         recall_mode=effective_recall_mode,
     )
@@ -2833,6 +3126,11 @@ def _run_hot_event_evaluation(
     stage_times["write_trace"] = time.perf_counter() - t0
 
     stage_times["event_total"] = time.perf_counter() - total_start
+    # 图识别耗时：由上游 image/text-image 任务写入事件元数据，这里并入模块耗时，
+    # 这样前端「!」浮窗里的「图识别」一行才会体现识图花费的时间。
+    ocr_meta = hot_event.get("image_recognition")
+    if isinstance(ocr_meta, dict) and ocr_meta.get("ocr_seconds") is not None:
+        stage_times["image_recognition"] = float(ocr_meta["ocr_seconds"])
     return output_path, output_payload, stage_times
 
 
@@ -3232,10 +3530,10 @@ def _normalize_llm_container(
 
 def _stage_text(node: StrategyNodePlan) -> str:
     stage_map = {
-        "stage_1_launch": "启动期",
-        "stage_2_engage": "互动期",
-        "stage_2_support": "支持期",
-        "stage_3_amplify": "扩散期",
+        "stage_node_activation": "节点激活时期",
+        "stage_info_diffusion": "信息扩散时期",
+        "stage_influence": "影响力强化阶段",
+        "stage_consensus": "共识形成阶段",
     }
     stage_label = stage_map.get(node.dispatch_stage, node.dispatch_stage)
     if node.timing_window:
@@ -3327,7 +3625,7 @@ def _cross_digital_human_strategy(
         )
     if node.selected_role == "amplification_node":
         return (
-            f"在扩散期转发核心节点 {','.join(core_ids) or '-'} 的内容，"
+            f"在信息扩散时期转发核心节点 {','.join(core_ids) or '-'} 的内容，"
             f"必要时补充互动节点 {','.join(engage_ids) or '-'} 的答疑信息。"
         )
     return "对其他主选数字人的关键信息做补充说明和长尾维护。"

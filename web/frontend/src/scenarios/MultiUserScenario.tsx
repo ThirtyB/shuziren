@@ -78,6 +78,10 @@ export function MultiUserScenario(props: SharedScenarioProps) {
           setProfileLimit={props.setProfileLimit}
           allowedPlatforms={props.allowedPlatforms}
           setAllowedPlatforms={props.setAllowedPlatforms}
+          waterArmyEnabled={props.waterArmyEnabled}
+          setWaterArmyEnabled={props.setWaterArmyEnabled}
+          waterArmyCount={props.waterArmyCount}
+          setWaterArmyCount={props.setWaterArmyCount}
           // 多人协同：用户只需指定"平台 + 小队人数"。风险等级 / 传播窗口 /
           // 频率上限 / Profile 限制保持默认值，不在本场景暴露。
           showMaxSelectedNodes={true}

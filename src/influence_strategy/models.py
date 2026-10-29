@@ -26,6 +26,8 @@ class UserProfile(BaseModel):
     # 数字人所属模拟平台（facebook_simulated / instagram_simulated / twitter_simulated）。
     # 空字符串表示旧数据集未提供平台归属，选人时应视为"平台未知"。
     platform: str = ""
+    # 是否来自"白库"（低活跃度水军库）。仅用于水军参与逻辑区分，不影响其它逻辑。
+    is_water_army: bool = False
 
 
 class GraphAttributes(BaseModel):
@@ -236,6 +238,8 @@ class NodeScore(NodeFeature):
     priority_tier: Literal["high", "medium", "low"] = "low"
     risk_flags: list[str] = Field(default_factory=list)
     selection_reasons: list[str] = Field(default_factory=list)
+    # 是否来自"白库"（低活跃度水军）。水军只做点赞/转发，不计入选人上限。
+    is_water_army: bool = False
 
 
 class ScoreSummary(BaseModel):
@@ -273,7 +277,7 @@ class SelectionSummary(BaseModel):
     selected_role_distribution: dict[str, int] = Field(default_factory=dict)
     selected_stage_distribution: dict[str, int] = Field(default_factory=dict)
     avg_selected_final_score: float = 0.0
-    selection_mode: Literal["automatic", "targeted"] = "automatic"
+    selection_mode: Literal["automatic", "targeted", "attention"] = "automatic"
     # 多人分发指定的平台（multi_user 模式下候选池只保留该平台的数字人）。
     dispatch_platform: str | None = None
     target_user_id: str | None = None
@@ -283,6 +287,13 @@ class SelectionSummary(BaseModel):
     target_final_score: float | None = None
     target_topic_match_score: float | None = None
     target_warning: list[str] = Field(default_factory=list)
+    # 思路二（数字人注意）专属：被点名路人的显示名与"旧帖编号"（仅用于 @ 点名，不读旧帖内容）。
+    target_user_name: str | None = None
+    target_old_post_id: str | None = None
+    # 白库水军参与：是否启用、计划数量、实际选中的平台分布（不计入 max_selected_nodes）。
+    water_army_enabled: bool = False
+    water_army_count: int = 0
+    water_army_platforms: list[str] = Field(default_factory=list)
 
 
 class SelectionResult(BaseModel):
@@ -291,6 +302,8 @@ class SelectionResult(BaseModel):
     summary: SelectionSummary
     selected_nodes: list[SelectedNode]
     fallback_nodes: list[SelectedNode]
+    # 白库水军节点：仅做点赞/转发，不计入选人上限，也不参与角色编排。
+    water_army_nodes: list[SelectedNode] = Field(default_factory=list)
 
 
 class StrategyNodePlan(BaseModel):
@@ -303,6 +316,8 @@ class StrategyNodePlan(BaseModel):
     selected_role: str
     dispatch_stage: str
     dispatch_priority: str = "p3"
+    # 是否来自"白库"（低活跃度水军）。水军只做点赞/转发，不计入选人上限。
+    is_water_army: bool = False
     final_score: float = 0.0
     risk_level: Literal["low", "medium", "high"] = "low"
     manual_review_required: bool = False
@@ -407,4 +422,6 @@ class StrategyResult(BaseModel):
     stage_plans: list[StrategyStagePlan]
     selected_nodes: list[StrategyNodePlan]
     fallback_nodes: list[StrategyNodePlan]
+    # 白库水军节点（StrategyNodePlan 形式），不计入选人上限、不参与角色编排。
+    water_army_nodes: list[StrategyNodePlan] = Field(default_factory=list)
     strategy: DispatchStrategy

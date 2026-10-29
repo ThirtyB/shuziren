@@ -1,0 +1,602 @@
+{
+  "wa_facebook_0001": {
+    "user_id": "wa_facebook_0001",
+    "user_name": "白号_facebook_0001",
+    "platform": "facebook_simulated",
+    "user_followers": 8,
+    "user_friends": 14,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_facebook_0002": {
+    "user_id": "wa_facebook_0002",
+    "user_name": "白号_facebook_0002",
+    "platform": "facebook_simulated",
+    "user_followers": 3,
+    "user_friends": 20,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_facebook_0003": {
+    "user_id": "wa_facebook_0003",
+    "user_name": "白号_facebook_0003",
+    "platform": "facebook_simulated",
+    "user_followers": 5,
+    "user_friends": 14,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_facebook_0004": {
+    "user_id": "wa_facebook_0004",
+    "user_name": "白号_facebook_0004",
+    "platform": "facebook_simulated",
+    "user_followers": 4,
+    "user_friends": 5,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_facebook_0005": {
+    "user_id": "wa_facebook_0005",
+    "user_name": "白号_facebook_0005",
+    "platform": "facebook_simulated",
+    "user_followers": 11,
+    "user_friends": 21,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_facebook_0006": {
+    "user_id": "wa_facebook_0006",
+    "user_name": "白号_facebook_0006",
+    "platform": "facebook_simulated",
+    "user_followers": 7,
+    "user_friends": 22,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_facebook_0007": {
+    "user_id": "wa_facebook_0007",
+    "user_name": "白号_facebook_0007",
+    "platform": "facebook_simulated",
+    "user_followers": 6,
+    "user_friends": 2,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_facebook_0008": {
+    "user_id": "wa_facebook_0008",
+    "user_name": "白号_facebook_0008",
+    "platform": "facebook_simulated",
+    "user_followers": 12,
+    "user_friends": 8,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_facebook_0009": {
+    "user_id": "wa_facebook_0009",
+    "user_name": "白号_facebook_0009",
+    "platform": "facebook_simulated",
+    "user_followers": 11,
+    "user_friends": 8,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_facebook_0010": {
+    "user_id": "wa_facebook_0010",
+    "user_name": "白号_facebook_0010",
+    "platform": "facebook_simulated",
+    "user_followers": 2,
+    "user_friends": 13,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_facebook_0011": {
+    "user_id": "wa_facebook_0011",
+    "user_name": "白号_facebook_0011",
+    "platform": "facebook_simulated",
+    "user_followers": 10,
+    "user_friends": 7,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_facebook_0012": {
+    "user_id": "wa_facebook_0012",
+    "user_name": "白号_facebook_0012",
+    "platform": "facebook_simulated",
+    "user_followers": 8,
+    "user_friends": 4,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_facebook_0013": {
+    "user_id": "wa_facebook_0013",
+    "user_name": "白号_facebook_0013",
+    "platform": "facebook_simulated",
+    "user_followers": 4,
+    "user_friends": 11,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_facebook_0014": {
+    "user_id": "wa_facebook_0014",
+    "user_name": "白号_facebook_0014",
+    "platform": "facebook_simulated",
+    "user_followers": 9,
+    "user_friends": 3,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_facebook_0015": {
+    "user_id": "wa_facebook_0015",
+    "user_name": "白号_facebook_0015",
+    "platform": "facebook_simulated",
+    "user_followers": 12,
+    "user_friends": 7,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_facebook_0016": {
+    "user_id": "wa_facebook_0016",
+    "user_name": "白号_facebook_0016",
+    "platform": "facebook_simulated",
+    "user_followers": 1,
+    "user_friends": 10,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_facebook_0017": {
+    "user_id": "wa_facebook_0017",
+    "user_name": "白号_facebook_0017",
+    "platform": "facebook_simulated",
+    "user_followers": 10,
+    "user_friends": 8,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_facebook_0018": {
+    "user_id": "wa_facebook_0018",
+    "user_name": "白号_facebook_0018",
+    "platform": "facebook_simulated",
+    "user_followers": 3,
+    "user_friends": 14,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_facebook_0019": {
+    "user_id": "wa_facebook_0019",
+    "user_name": "白号_facebook_0019",
+    "platform": "facebook_simulated",
+    "user_followers": 6,
+    "user_friends": 6,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_facebook_0020": {
+    "user_id": "wa_facebook_0020",
+    "user_name": "白号_facebook_0020",
+    "platform": "facebook_simulated",
+    "user_followers": 3,
+    "user_friends": 16,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_instagram_0001": {
+    "user_id": "wa_instagram_0001",
+    "user_name": "白号_instagram_0001",
+    "platform": "instagram_simulated",
+    "user_followers": 8,
+    "user_friends": 3,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_instagram_0002": {
+    "user_id": "wa_instagram_0002",
+    "user_name": "白号_instagram_0002",
+    "platform": "instagram_simulated",
+    "user_followers": 1,
+    "user_friends": 5,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_instagram_0003": {
+    "user_id": "wa_instagram_0003",
+    "user_name": "白号_instagram_0003",
+    "platform": "instagram_simulated",
+    "user_followers": 4,
+    "user_friends": 3,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_instagram_0004": {
+    "user_id": "wa_instagram_0004",
+    "user_name": "白号_instagram_0004",
+    "platform": "instagram_simulated",
+    "user_followers": 3,
+    "user_friends": 20,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_instagram_0005": {
+    "user_id": "wa_instagram_0005",
+    "user_name": "白号_instagram_0005",
+    "platform": "instagram_simulated",
+    "user_followers": 7,
+    "user_friends": 9,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_instagram_0006": {
+    "user_id": "wa_instagram_0006",
+    "user_name": "白号_instagram_0006",
+    "platform": "instagram_simulated",
+    "user_followers": 6,
+    "user_friends": 4,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_instagram_0007": {
+    "user_id": "wa_instagram_0007",
+    "user_name": "白号_instagram_0007",
+    "platform": "instagram_simulated",
+    "user_followers": 2,
+    "user_friends": 17,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_instagram_0008": {
+    "user_id": "wa_instagram_0008",
+    "user_name": "白号_instagram_0008",
+    "platform": "instagram_simulated",
+    "user_followers": 6,
+    "user_friends": 19,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_instagram_0009": {
+    "user_id": "wa_instagram_0009",
+    "user_name": "白号_instagram_0009",
+    "platform": "instagram_simulated",
+    "user_followers": 7,
+    "user_friends": 19,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_instagram_0010": {
+    "user_id": "wa_instagram_0010",
+    "user_name": "白号_instagram_0010",
+    "platform": "instagram_simulated",
+    "user_followers": 7,
+    "user_friends": 12,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_instagram_0011": {
+    "user_id": "wa_instagram_0011",
+    "user_name": "白号_instagram_0011",
+    "platform": "instagram_simulated",
+    "user_followers": 6,
+    "user_friends": 24,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_instagram_0012": {
+    "user_id": "wa_instagram_0012",
+    "user_name": "白号_instagram_0012",
+    "platform": "instagram_simulated",
+    "user_followers": 12,
+    "user_friends": 0,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_instagram_0013": {
+    "user_id": "wa_instagram_0013",
+    "user_name": "白号_instagram_0013",
+    "platform": "instagram_simulated",
+    "user_followers": 7,
+    "user_friends": 19,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_instagram_0014": {
+    "user_id": "wa_instagram_0014",
+    "user_name": "白号_instagram_0014",
+    "platform": "instagram_simulated",
+    "user_followers": 12,
+    "user_friends": 1,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_instagram_0015": {
+    "user_id": "wa_instagram_0015",
+    "user_name": "白号_instagram_0015",
+    "platform": "instagram_simulated",
+    "user_followers": 8,
+    "user_friends": 19,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_instagram_0016": {
+    "user_id": "wa_instagram_0016",
+    "user_name": "白号_instagram_0016",
+    "platform": "instagram_simulated",
+    "user_followers": 10,
+    "user_friends": 20,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_instagram_0017": {
+    "user_id": "wa_instagram_0017",
+    "user_name": "白号_instagram_0017",
+    "platform": "instagram_simulated",
+    "user_followers": 4,
+    "user_friends": 20,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_instagram_0018": {
+    "user_id": "wa_instagram_0018",
+    "user_name": "白号_instagram_0018",
+    "platform": "instagram_simulated",
+    "user_followers": 6,
+    "user_friends": 14,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_instagram_0019": {
+    "user_id": "wa_instagram_0019",
+    "user_name": "白号_instagram_0019",
+    "platform": "instagram_simulated",
+    "user_followers": 5,
+    "user_friends": 4,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_instagram_0020": {
+    "user_id": "wa_instagram_0020",
+    "user_name": "白号_instagram_0020",
+    "platform": "instagram_simulated",
+    "user_followers": 7,
+    "user_friends": 14,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_twitter_0001": {
+    "user_id": "wa_twitter_0001",
+    "user_name": "白号_twitter_0001",
+    "platform": "twitter_simulated",
+    "user_followers": 10,
+    "user_friends": 9,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_twitter_0002": {
+    "user_id": "wa_twitter_0002",
+    "user_name": "白号_twitter_0002",
+    "platform": "twitter_simulated",
+    "user_followers": 11,
+    "user_friends": 5,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_twitter_0003": {
+    "user_id": "wa_twitter_0003",
+    "user_name": "白号_twitter_0003",
+    "platform": "twitter_simulated",
+    "user_followers": 12,
+    "user_friends": 20,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_twitter_0004": {
+    "user_id": "wa_twitter_0004",
+    "user_name": "白号_twitter_0004",
+    "platform": "twitter_simulated",
+    "user_followers": 5,
+    "user_friends": 22,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_twitter_0005": {
+    "user_id": "wa_twitter_0005",
+    "user_name": "白号_twitter_0005",
+    "platform": "twitter_simulated",
+    "user_followers": 8,
+    "user_friends": 24,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_twitter_0006": {
+    "user_id": "wa_twitter_0006",
+    "user_name": "白号_twitter_0006",
+    "platform": "twitter_simulated",
+    "user_followers": 1,
+    "user_friends": 11,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_twitter_0007": {
+    "user_id": "wa_twitter_0007",
+    "user_name": "白号_twitter_0007",
+    "platform": "twitter_simulated",
+    "user_followers": 5,
+    "user_friends": 8,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_twitter_0008": {
+    "user_id": "wa_twitter_0008",
+    "user_name": "白号_twitter_0008",
+    "platform": "twitter_simulated",
+    "user_followers": 7,
+    "user_friends": 15,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_twitter_0009": {
+    "user_id": "wa_twitter_0009",
+    "user_name": "白号_twitter_0009",
+    "platform": "twitter_simulated",
+    "user_followers": 6,
+    "user_friends": 24,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_twitter_0010": {
+    "user_id": "wa_twitter_0010",
+    "user_name": "白号_twitter_0010",
+    "platform": "twitter_simulated",
+    "user_followers": 9,
+    "user_friends": 13,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_twitter_0011": {
+    "user_id": "wa_twitter_0011",
+    "user_name": "白号_twitter_0011",
+    "platform": "twitter_simulated",
+    "user_followers": 4,
+    "user_friends": 20,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_twitter_0012": {
+    "user_id": "wa_twitter_0012",
+    "user_name": "白号_twitter_0012",
+    "platform": "twitter_simulated",
+    "user_followers": 11,
+    "user_friends": 14,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_twitter_0013": {
+    "user_id": "wa_twitter_0013",
+    "user_name": "白号_twitter_0013",
+    "platform": "twitter_simulated",
+    "user_followers": 8,
+    "user_friends": 9,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_twitter_0014": {
+    "user_id": "wa_twitter_0014",
+    "user_name": "白号_twitter_0014",
+    "platform": "twitter_simulated",
+    "user_followers": 2,
+    "user_friends": 0,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_twitter_0015": {
+    "user_id": "wa_twitter_0015",
+    "user_name": "白号_twitter_0015",
+    "platform": "twitter_simulated",
+    "user_followers": 10,
+    "user_friends": 13,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_twitter_0016": {
+    "user_id": "wa_twitter_0016",
+    "user_name": "白号_twitter_0016",
+    "platform": "twitter_simulated",
+    "user_followers": 3,
+    "user_friends": 19,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_twitter_0017": {
+    "user_id": "wa_twitter_0017",
+    "user_name": "白号_twitter_0017",
+    "platform": "twitter_simulated",
+    "user_followers": 7,
+    "user_friends": 8,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_twitter_0018": {
+    "user_id": "wa_twitter_0018",
+    "user_name": "白号_twitter_0018",
+    "platform": "twitter_simulated",
+    "user_followers": 5,
+    "user_friends": 10,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_twitter_0019": {
+    "user_id": "wa_twitter_0019",
+    "user_name": "白号_twitter_0019",
+    "platform": "twitter_simulated",
+    "user_followers": 2,
+    "user_friends": 8,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  },
+  "wa_twitter_0020": {
+    "user_id": "wa_twitter_0020",
+    "user_name": "白号_twitter_0020",
+    "platform": "twitter_simulated",
+    "user_followers": 8,
+    "user_friends": 15,
+    "user_interests": [],
+    "user_description": "白库低活跃水军账号（仅用于点赞/转发放大参与度）",
+    "is_water_army": true
+  }
+}

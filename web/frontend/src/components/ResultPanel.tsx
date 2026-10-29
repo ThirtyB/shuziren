@@ -4,6 +4,7 @@ import type { RunResult, RunStatus } from "../types";
 import { platformLabel, platformModeLabel } from "../lib/platforms";
 import { DataTable } from "./DataTable";
 import { SectionTitle } from "./SectionTitle";
+import SupportNodePanel from "./SupportNodePanel";
 
 /** 数字人原始 id → 统一编号（D01…）的映射，用于把所有出现处的原始 id 收敛成编号。 */
 function buildIdMap(division: Array<Record<string, unknown>>): Record<string, string> {
@@ -45,6 +46,7 @@ const MODULE_LABELS: Record<string, string> = {
   content_generation: "内容生成",
   write_output: "写出结果",
   write_trace: "写出 Trace",
+  image_recognition: "图识别",
   event_total: "总耗时",
 };
 
@@ -62,6 +64,7 @@ const MODULE_ORDER = [
   "content_generation",
   "write_output",
   "write_trace",
+  "image_recognition",
   "event_total",
 ];
 
@@ -88,8 +91,6 @@ export function ResultPanel({
   trace: Record<string, unknown> | null;
   loading: boolean;
 }) {
-  // 各模块耗时默认常驻显示（不再需要点「!」展开）。
-  const [showModules, setShowModules] = useState(true);
   return (
     <section className="panel result-panel">
       <div className="result-head">
@@ -123,23 +124,35 @@ export function ResultPanel({
               <div>
                 <span>运行耗时</span>
                 <strong>{run.elapsed_seconds.toFixed(2)} 秒</strong>
-                <button
-                  type="button"
-                  className="info-toggle"
-                  title="查看各模块耗时"
-                  aria-label="查看各模块耗时"
-                  onClick={() => setShowModules((v) => !v)}
-                >
-                  !
-                </button>
-              </div>
-            )}
-            {showModules && result?.stage_times && (
-              <div style={{ flexBasis: "100%" }}>
-                <ModuleTimes times={result.stage_times} />
+                {result?.stage_times && (
+                  <span className="info-toggle-wrap">
+                    <button
+                      type="button"
+                      className="info-toggle"
+                      title="查看各模块耗时"
+                      aria-label="查看各模块耗时"
+                    >
+                      !
+                    </button>
+                    <span className="module-times-popover" role="tooltip">
+                      <ModuleTimes times={result.stage_times} />
+                    </span>
+                  </span>
+                )}
               </div>
             )}
           </div>
+
+          {run?.mode === "image" && runId && (
+            <div className="image-preview">
+              <div className="image-preview-head">识别原图</div>
+              <img
+                className="image-preview-img"
+                src={`/api/runs/${runId}/image`}
+                alt="识别原图"
+              />
+            </div>
+          )}
 
           {result.dispatch_mode === "single_target" && (
             <SingleTargetDetail payload={payload} result={result} />
@@ -152,6 +165,8 @@ export function ResultPanel({
           {result.dispatch_mode === "cross_platform" && (
             <CrossPlatformDetail payload={payload} />
           )}
+
+          <SupportNodePanel payload={payload} />
 
           <TraceSection trace={trace} />
           <section className="result-section">
@@ -328,7 +343,7 @@ function FiveDimension({ payload }: { payload: Record<string, unknown> }) {
   const stageStats =
     (time?.["阶段统计"] as Array<Record<string, unknown>> | undefined) ?? [];
   const timePlanRows = withNumbering(
-    (time?.["数字人时间安排"] as Array<Record<string, unknown>> | undefined) ?? [],
+    (time?.["数字人角色"] as Array<Record<string, unknown>> | undefined) ?? [],
     idMap,
   );
   const frequencyItems = withNumbering(
@@ -360,9 +375,9 @@ function FiveDimension({ payload }: { payload: Record<string, unknown> }) {
         <RoleView humans={division} />
       </section>
 
-      {/* 时间维度：阶段统计（含时期—窗口）与每人数安排。时期—窗口不再单列，避免重复。 */}
+      {/* 时间维度：阶段统计（含时期—窗口）与每人数身份（角色）。 */}
       <section className="result-section">
-        <h3>时间（阶段统计）</h3>
+        <h3>数字人角色与阶段统计</h3>
         <StageStatView stats={stageStats} />
         <DataTable items={timePlanRows} />
       </section>
@@ -401,7 +416,7 @@ function FiveDimension({ payload }: { payload: Record<string, unknown> }) {
 }
 
 /**
- * 各模块耗时：点击运行耗时旁的「!」后展开，逐项列出本轮评估各阶段墙钟耗时（秒）。
+ * 各模块耗时：鼠标悬停运行耗时旁的「!」时，以浮动窗口展示本轮评估各阶段墙钟耗时（秒）。
  *
  * 数据来自 ``result.stage_times``（后端 ``_result_summary`` 已随结果返回），
  * 模块名统一翻译成中文；未知模块名原样展示，展示顺序按 ``MODULE_ORDER`` 排。
@@ -548,7 +563,7 @@ function FrequencyView({
 
 /**
  * 动作清单：按「动作分组」（多人模式即四个时期）分组，每组一个小标题，
- * 从而把同一时期的动作聚拢，明确体现首发期 → 互动期 → 扩散期 → 支持期。
+ * 从而把同一时期的动作聚拢，明确体现节点激活时期 → 信息扩散时期 → 影响力强化阶段 → 共识形成阶段。
  *
  * 后端已按序号（= 时间顺序）排好，这里只做分组展示。每行固定六列：
  * 动作编号 / 数字人 / 动作类型 / 依赖动作编号 / 依赖帖子编号 / 内容编号。

@@ -307,21 +307,21 @@ TWITTER_PROFILE = PlatformProfile(
     time_blueprint=[
         PlatformTimeStageSpec(
             stage_key="thread_launch",
-            label="推文串首发期",
+            label="推文串节点激活时期",
             ratio_start=0.0,
             ratio_end=0.20,
             focus="集中发布推文串首条与主体，抢占话题早期注意力。",
         ),
         PlatformTimeStageSpec(
             stage_key="retweet_ride",
-            label="转发扩散期",
+            label="转发信息扩散时期",
             ratio_start=0.20,
             ratio_end=0.60,
             focus="围绕核心事实做短评转发与多角度补充推文。",
         ),
         PlatformTimeStageSpec(
             stage_key="reply_engage",
-            label="回复互动期",
+            label="回复节点激活时期",
             ratio_start=0.60,
             ratio_end=1.0,
             focus="以回复互动为核心，处理高频疑问并纠正误读。",
