@@ -882,26 +882,29 @@ def _run_image_job(*, run_id: str, image_path: Path, options: RunOptions) -> Non
     _run_events_job(run_id=run_id, events=events, options=options)
 
 
-def _fuse_text_and_ocr(event_text: str, image_path: Path | None) -> str:
+def _fuse_text_and_ocr(
+    event_text: str, image_path: Path | None
+) -> tuple[str, str | None]:
     """把用户输入文字与图片 OCR 文字融合成一段事件描述。
 
+    返回 ``(融合后文本, OCR 原文或 None)``，便于上层把识别到的文字回显到结果里。
     融合策略：用户输入为主，OCR 文本作为补充内容追加在后面。图片缺失或 OCR
     不可用时，仅保留用户文字（不抛异常，由上层决定是否降级）。
     """
 
     text = (event_text or "").strip()
     if image_path is None:
-        return text
+        return text, None
     try:
         outcome = run_ocr(image_path)
     except Exception:
-        return text
+        return text, None
     ocr_text = "\n".join(outcome.kept_texts).strip()
     if not ocr_text:
-        return text
+        return text, None
     if not text:
-        return ocr_text
-    return f"{text}\n{ocr_text}"
+        return ocr_text, ocr_text
+    return f"{text}\n{ocr_text}", ocr_text
 
 
 def _run_text_image_job(
@@ -916,9 +919,10 @@ def _run_text_image_job(
     _update_status(run_id, current_event_id="image_recognition")
     t0 = time.perf_counter()
     try:
-        combined_text = _fuse_text_and_ocr(event_text, image_path)
+        combined_text, ocr_text = _fuse_text_and_ocr(event_text, image_path)
     except Exception as exc:  # OCR 异常不应让整次运行崩溃，降级为仅用文字
         combined_text = (event_text or "").strip()
+        ocr_text = None
         if not combined_text:
             raise ValueError(f"文字输入为空且图片识别失败：{exc}") from exc
         ocr_seconds = None
@@ -936,6 +940,7 @@ def _run_text_image_job(
         event["image_recognition"] = {
             "method": "ocr_local",
             "ocr_seconds": round(ocr_seconds, 3) if ocr_seconds is not None else None,
+            "text": ocr_text,
         }
     _run_events_job(run_id=run_id, events=[event], options=options)
 
@@ -1037,6 +1042,8 @@ def _run_events_job(*, run_id: str, events: list[dict[str, Any]], options: RunOp
                     allowed_platforms=options.allowed_platforms,
                     use_llm=options.use_llm,
                     trace_dir=effective_trace_dir,
+                    water_army_enabled=options.water_army_enabled,
+                    water_army_count=options.water_army_count,
                 )
             else:
                 output_path, payload, _stage_times = _run_hot_event_evaluation(

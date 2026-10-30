@@ -73,11 +73,6 @@ export function CrossPlatformScenario(props: SharedScenarioProps) {
 
   return (
     <form className="stack" onSubmit={handleSubmit}>
-      <div className="scenario-hint">
-        每个平台按自己的 requested_count 独立选人；不同平台可以重复出现不同的
-        数字人（前提是该数字人已写入两个平台的画像），但每个平台只能配置一次。
-      </div>
-
       <div className="sub-section">
         <div className="sub-section-head">
           <h3>平台人数配置</h3>

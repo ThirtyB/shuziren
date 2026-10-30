@@ -64,6 +64,7 @@ class StrategyPipeline:
         water_army_count: int = 0,
         recall_size: int | None = None,
         recall_mode: Literal["platform_aware"] | None = None,
+        include_user_ids: set[str] | None = None,
     ) -> StrategyResult:
         return self.run_with_artifacts(
             workspace_root=workspace_root,
@@ -79,6 +80,7 @@ class StrategyPipeline:
             water_army_count=water_army_count,
             recall_size=recall_size,
             recall_mode=recall_mode,
+            include_user_ids=include_user_ids,
         ).strategy_result
 
     def run_with_artifacts(
@@ -96,6 +98,7 @@ class StrategyPipeline:
         water_army_count: int = 0,
         recall_size: int | None = None,
         recall_mode: Literal["platform_aware"] | None = None,
+        include_user_ids: set[str] | None = None,
     ) -> PipelineArtifacts:
         client = llm_client
         if client is None and use_llm:
@@ -127,6 +130,7 @@ class StrategyPipeline:
             recall_size=recall_size,
             recall_mode=recall_mode,
             dispatch_platform=dispatch_platform,
+            include_user_ids=include_user_ids,
         )
         stage_times["feature_builder"] = time.perf_counter() - t0
 

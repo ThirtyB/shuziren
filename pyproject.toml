@@ -8,6 +8,21 @@ version = "0.1.0"
 description = "Lightweight baseline modules for influence event distribution strategy generation."
 readme = "README.md"
 requires-python = ">=3.11"
+# 运行期依赖：一键启动脚本 `pip install -e .[ocr,semantic]` 会据此安装。
+# （之前这里没有 dependencies，导致一键脚本装不到任何运行依赖，非 conda 环境必然启动失败。）
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.2,<3",
+    "pydantic>=2.8,<3",
+    "rapidfuzz>=3.9,<4",
+    "networkx>=3.3,<4",
+    "scipy>=1.10",
+    "scikit-learn>=1.3",
+    "matplotlib>=3.9,<4",
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.30,<1",
+    "python-multipart>=0.0.9,<1",
+]
 
 [project.optional-dependencies]
 # BGE 语义编码的**运行期**依赖（ONNX 推理路径）。

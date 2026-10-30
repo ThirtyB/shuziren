@@ -14,18 +14,18 @@ export type DispatchMode = "single_target" | "multi_user" | "cross_platform";
 export const SCENARIO_TABS: ReadonlyArray<{ key: DispatchMode; label: string; hint: string }> = [
   {
     key: "single_target",
-    label: "单人定向分发",
-    hint: "指定一个数字人，强制作为本次发布的唯一传播节点（常用于 VIP/KOL 测试或定向响应）。",
+    label: "单人定向",
+    hint: "",
   },
   {
     key: "multi_user",
-    label: "多人协同分发",
-    hint: "在一个模拟平台上，按角色（首发/互动/扩散/支持）自动选人，组成多角色小队。",
+    label: "多人协同",
+    hint: "",
   },
   {
     key: "cross_platform",
-    label: "跨平台并行分发",
-    hint: "为多个平台分别指定人数，每个平台独立选人，正文与动作按平台策略生成。",
+    label: "跨平台并行",
+    hint: "",
   },
 ];
 

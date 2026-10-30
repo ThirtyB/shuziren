@@ -64,17 +64,13 @@ export default function ConsoleRoute() {
     // 切源时清掉与上次系统事件/图像/文本输入相关的局部态（避免 picker 残留高亮、
     // 上一次的 File 对象或文本继续生效），但不要清 run / detail / trace，否则
     // 正在跑的 run 也会被一并隐藏。
+    // 注意：仅在切到"系统事件"来源时清空图片——系统事件不走图，且图片录入控件会随
+    // 来源切换卸载重挂；切换策略类型（单/多/跨平台）**不**应清空图片，否则无辜丢失。
     setSelectedEventId("");
     setSystemEvent(null);
     setImageFile(null);
     setUserText("");
   }, [eventSource]);
-
-  useEffect(() => {
-    // 切换场景时清空附带图片：图片在"用户输入"下作为可选补充，
-    // 切到其它场景或切走再切回时不应残留上一次选中的文件。
-    setImageFile(null);
-  }, [dispatchMode]);
 
   // 用户文本输入（单人/多人/跨平台 的"用户输入"模式下使用）：一段事件描述
   // 文本，提交时发给后端 /api/runs/text 的 event_text 字段，由后端"事件解析"成结构化
@@ -85,8 +81,9 @@ export default function ConsoleRoute() {
   const [systemEvent, setSystemEvent] = useState<SystemEventSummary | null>(null);
   const [systemPayload, setSystemPayload] = useState<Record<string, unknown> | null>(null);
 
-  // 多模态图像：在"用户输入 + 多人/跨平台"以及"单人定向的图文模式"下作为可选补充使用；
-  // 切源或切场景时清空，避免上一次选中的 File 继续在闭包里"有效"，造成"看起来没选图却能跑"的假象。
+  // 多模态图像：在"用户输入"下作为可选补充使用（单人/多人/跨平台共用同一录入）。
+  // 仅在切到"系统事件"来源时清空（图片不用于系统事件，且图片录入控件随来源切换卸载重挂）；
+  // 切换策略类型（单/多/跨平台）时保留已选图片，避免无辜丢失。
   const [imageFile, setImageFile] = useState<File | null>(null);
 
   // 运行态
@@ -96,6 +93,9 @@ export default function ConsoleRoute() {
   const [trace, setTrace] = useState<Record<string, unknown> | null>(null);
   const [notice, setNotice] = useState("");
   const [loadingDetail, setLoadingDetail] = useState(false);
+  // 策略结果面板是否"打开"：true 时才自动选中并加载当前 run 的首条结果；
+  // 点 × 关闭后置为 false，自动选中逻辑不再生效（否则会被立刻重新打开）。
+  const [detailOpen, setDetailOpen] = useState(false);
 
   // 历史运行面板：
   //  - ``activeRunId``：当前 StatusPanel 显示的 run（最近一次发起的，或
@@ -109,14 +109,16 @@ export default function ConsoleRoute() {
   // 运行历史侧边栏：常态隐藏，点顶栏「运行历史」展开。
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  // 自动选第一条结果加载详情；运行完成（state 变化）或切换 history 时都会补加载，
-  // 避免「run 有结果但 detail 一直为空」导致面板只显示「选择一个结果查看详情」。
+  // 自动选中并加载"当前 run"的首条结果；仅当 detailOpen 为 true 时生效。
+  // 依赖 current run 的 run_id / state：切换历史 run 或新 run 完成后都会重选首条，
+  // 避免用旧 run 的事件 id 去新 run 取详情而 404（表现为"点历史进不去"）。
   useEffect(() => {
+    if (!detailOpen) return;
     if (!run?.run_id || !run.results?.length) return;
-    const target = selectedEventId || run.results[0].event_id;
-    if (!selectedEventId) setSelectedEventId(target);
-    void loadDetail(run.run_id, target);
-  }, [run?.run_id, run?.state, selectedEventId]);
+    const first = run.results[0].event_id;
+    if (selectedEventId !== first) setSelectedEventId(first);
+    void loadDetail(run.run_id, first);
+  }, [run?.run_id, run?.state, detailOpen]);
 
   const isRunning = run?.state === "queued" || run?.state === "running";
 
@@ -141,6 +143,7 @@ export default function ConsoleRoute() {
     setDetail(null);
     setTrace(null);
     setSelectedEventId("");
+    setDetailOpen(true);
     setNotice("");
     // 新 run 提交后，设为最新与当前显示；历史面板会因 refreshTick 刷新。
     setActiveRunId(status.run_id);
@@ -198,8 +201,10 @@ export default function ConsoleRoute() {
 
   // 历史列表项被点击：切换 activeRunId，详情面板会按新的 run 重新加载。
   function handleSelectHistory(entry: import("../lib/api").RunHistoryEntry) {
-    if (entry.run_id === activeRunId) return;
+    // 已打开同一条且仍处于打开态时不重复处理；关闭后再点同一条则重新打开。
+    if (entry.run_id === activeRunId && detailOpen) return;
     setActiveRunId(entry.run_id);
+    setDetailOpen(true);
     setSelectedEventId("");
     setDetail(null);
     setTrace(null);
@@ -215,6 +220,7 @@ export default function ConsoleRoute() {
     if (activeRunId === deletedRunId) {
       const next = remaining[0]?.run_id ?? "";
       setActiveRunId(next);
+      setDetailOpen(true);
       setSelectedEventId("");
       setDetail(null);
       setTrace(null);
@@ -326,24 +332,6 @@ export default function ConsoleRoute() {
 
       <main className="workspace-grid">
         <section className="panel input-panel">
-          <div className="scenario-tabs" role="tablist" aria-label="分发场景">
-            {SCENARIO_TABS.map((item) => (
-              <button
-                key={item.key}
-                role="tab"
-                aria-selected={dispatchMode === item.key}
-                className={
-                  dispatchMode === item.key ? "scenario-tab active" : "scenario-tab"
-                }
-                onClick={() => setDispatchMode(item.key)}
-              >
-                <span className="scenario-tab-icon">{SCENARIO_ICONS[item.key]}</span>
-                <span className="scenario-tab-label">{item.label}</span>
-              </button>
-            ))}
-          </div>
-          <ScenarioHint mode={dispatchMode} />
-
           <div className="sub-section">
             <div className="sub-section-head">
               <h3>事件来源</h3>
@@ -379,24 +367,45 @@ export default function ConsoleRoute() {
             )}
           </div>
 
-          {dispatchMode === "single_target" && (
-            <SingleTargetScenario {...sharedScenarioProps} />
-          )}
-          {dispatchMode === "multi_user" && <MultiUserScenario {...sharedScenarioProps} />}
-          {dispatchMode === "cross_platform" && (
-            <CrossPlatformScenario {...sharedScenarioProps} />
-          )}
         </section>
 
-        <StatusPanel
-          run={run}
-          notice={notice}
-          selectedEventId={selectedEventId}
-          onSelect={(eventId) => {
-            setSelectedEventId(eventId);
-            if (run?.run_id) void loadDetail(run.run_id, eventId);
-          }}
-        />
+        <div className="status-column">
+          <section className="panel config-panel">
+            <div className="sub-section-head">
+              <h3>分发配置</h3>
+            </div>
+            <div className="scenario-tabs" role="tablist" aria-label="分发场景">
+              {SCENARIO_TABS.map((item) => (
+                <button
+                  key={item.key}
+                  role="tab"
+                  aria-selected={dispatchMode === item.key}
+                  className={
+                    dispatchMode === item.key ? "scenario-tab active" : "scenario-tab"
+                  }
+                  onClick={() => setDispatchMode(item.key)}
+                >
+                  <span className="scenario-tab-icon">{SCENARIO_ICONS[item.key]}</span>
+                  <span className="scenario-tab-label">{item.label}</span>
+                </button>
+              ))}
+            </div>
+            <ScenarioHint mode={dispatchMode} />
+
+            {dispatchMode === "single_target" && (
+              <SingleTargetScenario {...sharedScenarioProps} />
+            )}
+            {dispatchMode === "multi_user" && <MultiUserScenario {...sharedScenarioProps} />}
+            {dispatchMode === "cross_platform" && (
+              <CrossPlatformScenario {...sharedScenarioProps} />
+            )}
+          </section>
+
+          <StatusPanel
+            run={run}
+            notice={notice}
+          />
+        </div>
 
         <ResultPanel
           runId={run?.run_id ?? null}
@@ -405,6 +414,8 @@ export default function ConsoleRoute() {
           payload={detail}
           trace={trace}
           loading={loadingDetail}
+          onClose={() => setDetailOpen(false)}
+          detailOpen={detailOpen}
         />
       </main>
 
@@ -437,7 +448,7 @@ function TextImageEventInput({
   return (
     <div className="event-input">
       <label className="json-editor">
-        事件描述（输入一段文本，系统自动解析为事件）
+        事件描述
         <textarea
           value={userText}
           rows={12}
@@ -446,16 +457,8 @@ function TextImageEventInput({
           spellCheck={false}
         />
       </label>
-      <p className="form-hint">
-        与系统事件的区别仅在于事件由文本解析得到，其余分发逻辑（选人 / 策略 /
-        输出）完全一致。
-      </p>
       <div className="optional-image">
         <h4>可选：附加图片</h4>
-        <p className="form-hint">
-          图片将经过本地 OCR 识别其中文字，与上方文字融合后作为事件描述。
-          不联网、不调用大模型；留空则仅用文字。
-        </p>
         <ImageEventForm onFileChange={onFileChange} />
       </div>
     </div>
@@ -464,6 +467,6 @@ function TextImageEventInput({
 
 function ScenarioHint({ mode }: { mode: DispatchMode }) {
   const item = SCENARIO_TABS.find((entry) => entry.key === mode);
-  if (!item) return null;
+  if (!item || !item.hint) return null;
   return <p className="scenario-summary">{item.hint}</p>;
 }

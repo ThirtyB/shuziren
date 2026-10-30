@@ -88,12 +88,6 @@ export function SingleTargetScenario(props: SingleTargetScenarioProps) {
 
   return (
     <form className="stack" onSubmit={handleSubmit}>
-      <div className="scenario-hint">
-        {singleTargetMode === "attention"
-          ? "多数字人协同，全程 @ 指定路人（被动、不反应），使其注意到事件。只需提供路人、时间窗口与事件。"
-          : "指定一个数字人作为本次事件的主发布节点。系统以该数字人为核心，自主完成「节点激活时期发布 → 节点激活时期自赞 → 信息扩散时期自转发 → 共识形成阶段自赞并再发承接帖」的自运营闭环。只需提供数字人、时间窗口与事件。"}
-      </div>
-
       <label className="wide">
         目标数字人 user_id
         <input

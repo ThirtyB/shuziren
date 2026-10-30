@@ -176,13 +176,23 @@ class Selector:
         water_army_count: int = 0,
         water_army_profiles: dict[str, UserProfile] | None = None,
     ) -> SelectionResult:
+        # 白库现在是"真实节点"库：这些 user_id 同时存在于主画像池，若不排除就会被
+        # 既选为核心发布、又当作水军，造成同一人被双重使用。这里把它们从核心候选中剔除。
+        water_army_user_ids = set(water_army_profiles or {})
         if target_user_id:
             if single_target_mode == "attention":
-                result = self._select_attention(score_result, target_user_id, target_old_post_id)
+                result = self._select_attention(
+                    score_result,
+                    target_user_id,
+                    target_old_post_id,
+                    exclude_user_ids=water_army_user_ids,
+                )
             else:
                 result = self._select_targeted(score_result, target_user_id)
         else:
-            result = self._select_automatic(score_result, dispatch_platform)
+            result = self._select_automatic(
+                score_result, dispatch_platform, exclude_user_ids=water_army_user_ids
+            )
 
         # 白库水军：仅在启用时参与，不计入选人上限，也不影响角色编排。
         if water_army_enabled and water_army_profiles:
@@ -549,6 +559,7 @@ class Selector:
         score_result: ScoreResult,
         target_user_id: str,
         target_old_post_id: str | None,
+        exclude_user_ids: set[str] | None = None,
     ) -> SelectionResult:
         """思路二（数字人注意）：多数字人协同，全程 @ 指定路人（被动、不反应）。
 
@@ -569,9 +580,11 @@ class Selector:
         target_platform = normalize_platform_key(target_node.platform) or None
         warnings = self._evaluate_target_warnings(target_node, score_result.node_scores)
 
-        # 复用多人协同选人逻辑，但演员中排除被点名的路人。
+        # 复用多人协同选人逻辑，但演员中排除被点名的路人及白库节点。
         result = self._select_automatic(
-            score_result, None, exclude_user_ids={target_user_id}
+            score_result,
+            None,
+            exclude_user_ids={target_user_id} | (exclude_user_ids or set()),
         )
         result.summary.selection_mode = "attention"
         result.summary.target_user_id = target_user_id

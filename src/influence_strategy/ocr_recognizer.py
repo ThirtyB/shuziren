@@ -102,6 +102,20 @@ DOMAIN_ANCHORS: dict[str, str] = {
     "general": "一般性的新闻与公共话题，无法归入上述特定领域。",
 }
 
+#: 领域关键词（纯规则命中计数用）。从 ``DOMAIN_ANCHORS`` 的语义中心提炼成可枚举的
+#: 触发词；词汇指向性很强（如"护航/导弹/油价/关税"），命中计数即可稳定分类，且零模型依赖。
+DOMAIN_KEYWORDS: dict[str, list[str]] = {
+    "military": ["军", "导弹", "护航", "军舰", "冲突", "海域", "军演", "兵力", "战争", "演习"],
+    "technology": ["人工智能", "ai", "芯片", "算力", "算法", "大模型", "半导体", "生成式", "量子"],
+    "politics": ["政府", "治理", "监管", "政策", "法规", "法治", "协商", "磋商", "规则", "合规"],
+    "finance": ["金融", "银行", "利率", "股市", "汇率", "投资", "债券", "资本", "通胀"],
+    "energy": ["能源", "石油", "油价", "天然气", "电力", "燃油", "煤炭", "新能源", "电网"],
+    "international_relations": ["国际", "多国", "跨境", "谈判", "关税", "外交", "全球", "协定", "双边"],
+    "climate": ["气候", "碳中和", "碳排放", "环保", "减排", "绿色", "低碳"],
+    "cybersecurity": ["网络", "数据安全", "黑客", "攻击", "隐私", "加密", "泄露", "漏洞"],
+    "public_policy": ["民生", "医疗", "教育", "社保", "就业", "住房", "公共", "疫苗"],
+}
+
 #: 领域分类器懒加载缓存（进程内只构建一次）。
 _DOMAIN_CLASSIFIER: Any = None
 _DOMAIN_CLASSIFIER_READY = False
@@ -167,6 +181,11 @@ def _load_engine() -> Any:
     默认关闭角度分类器（``use_cls=False``）：本系统只处理横排新闻截图，方向分类是
     多余的逐行开销；关掉后每个文本行少跑一次分类网络，单图识别稳定快约 0.1~0.2s，
     对横排文字的识别精度无影响。
+
+    执行提供器（CPU / GPU）说明：本机装的是 ``onnxruntime-directml``（Windows 自带
+    DirectML，走任意 DX12 显卡，无需 CUDA/cuDNN），因此这里显式打开 ``det_use_dml`` /
+    ``rec_use_dml``，让检测与识别两个 CNN 都跑在 GPU 上；若环境只有 CPU 版
+    ``onnxruntime``，这两个开关会被 RapidOCR 安全忽略、自动回退到 CPU，不影响功能。
     """
 
     global _engine
@@ -176,8 +195,15 @@ def _load_engine() -> Any:
         if _engine is None:
             from rapidocr_onnxruntime import RapidOCR
 
-            _engine = RapidOCR(use_cls=False)
-            logger.info("RapidOCR 引擎已加载（use_cls=False）")
+            # use_cls=False：本系统只处理横排新闻截图，方向分类是多余开销。
+            # *_use_dml=True：优先用 DirectML(GPU)；缺 GPU 时自动回退 CPU，不会报错。
+            _engine = RapidOCR(
+                use_cls=False,
+                det_use_dml=True,
+                rec_use_dml=True,
+                cls_use_dml=True,
+            )
+            logger.info("RapidOCR 引擎已加载（use_cls=False, use_dml=True）")
     return _engine
 
 
@@ -298,6 +324,25 @@ def infer_domain(texts: Iterable[str], workspace_root: str | Path | None = None)
     return label
 
 
+def classify_domain_keyword(texts: Iterable[str]) -> str:
+    """零模型的关键词领域分类（图片识别链路专用，取代 BGE 语义分类器）。
+
+    原先图片链路走 ``infer_domain`` → ``SemanticClassifier``（BGE 编码器），单次识别
+    要花 ~1.5s 加载/编码；而 image 模式最终会把事件匹配到参考事件、domain 由参考事件
+    覆盖，OCR 阶段算出的 domain 在命中时被丢弃——这 1.5s 是纯开销。新闻截图词汇指向性
+    极强，关键词命中计数即可稳定分类，且 <1ms、不依赖任何模型。未命中任何关键词回落
+    ``general``。
+    """
+
+    joined = " ".join(texts).lower()
+    best, best_count = "general", 0
+    for domain, keywords in DOMAIN_KEYWORDS.items():
+        count = sum(1 for kw in keywords if kw.lower() in joined)
+        if count > best_count:
+            best, best_count = domain, count
+    return best
+
+
 def build_event_fields(texts: Sequence[str]) -> dict[str, Any]:
     """把 OCR 文字块重组成事件字段（纯规则，无模型）。
 
@@ -350,7 +395,10 @@ def build_event_fields(texts: Sequence[str]) -> dict[str, Any]:
     if not variants:
         variants = [summary]
 
-    domain = infer_domain(cleaned)
+    # 领域判定改用零模型关键词分类（见 ``classify_domain_keyword``）：图片链路里
+    # 事件最终会匹配到参考事件、domain 由参考事件覆盖，BGE 语义分类器那 ~1.5s 是
+    # 纯开销；关键词命中计数 <1ms 且对新闻截图同样可靠。
+    domain = classify_domain_keyword(cleaned)
 
     return {
         "event_title": title,

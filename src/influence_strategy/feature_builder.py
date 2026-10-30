@@ -173,6 +173,7 @@ class FeatureBuilder:
         recall_size: int | None = None,
         recall_mode: Literal["platform_aware"] | None = None,
         dispatch_platform: str | None = None,
+        include_user_ids: set[str] | None = None,
     ) -> FeatureBuildResult:
         loader = DataLoader(workspace_root, product_name=self.product_name)
         product_context = loader.load_product_context()
@@ -205,6 +206,11 @@ class FeatureBuilder:
                 source_user_ids=source_user_ids,
                 workspace_root=workspace_root,
             )
+
+        # 强制保留指定节点（如单人定向模式的目标用户）：并入召回集合，保证其一定进入
+        # 候选池，避免 _select_targeted 因目标缺失而 fail-fast 报错。
+        if include_user_ids:
+            recall_user_ids = (recall_user_ids or set()) | include_user_ids
 
         return self.build_features(
             product_context=product_context,

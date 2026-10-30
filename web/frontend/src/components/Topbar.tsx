@@ -24,7 +24,7 @@ export function Topbar({
     <header className="topbar">
       <div className="topbar-brand">
         <h1>影响力事件分发控制台</h1>
-        <p>{subtitle} · 输出目录 outputs/web_runs</p>
+        <p>{subtitle}</p>
       </div>
       <div className="topbar-actions">
         <nav className="page-nav" aria-label="页面切换">

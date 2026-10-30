@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Download } from "lucide-react";
+import { Download, X } from "lucide-react";
 import type { RunResult, RunStatus } from "../types";
 import { platformLabel, platformModeLabel } from "../lib/platforms";
 import { DataTable } from "./DataTable";
@@ -35,7 +35,7 @@ function withNumbering(
 /** 各模块耗时的中文标签；未知模块名原样展示。 */
 const MODULE_LABELS: Record<string, string> = {
   llm_client_init: "LLM 客户端初始化",
-  hot_event_to_payload: "事件解析",
+  hot_event_to_payload: "事件标准化",
   event_parser: "事件解析",
   feature_builder: "特征构建",
   recall: "候选召回",
@@ -83,6 +83,8 @@ export function ResultPanel({
   payload,
   trace,
   loading,
+  onClose,
+  detailOpen,
 }: {
   runId: string | null;
   run: RunStatus | null;
@@ -90,35 +92,55 @@ export function ResultPanel({
   payload: Record<string, unknown> | null;
   trace: Record<string, unknown> | null;
   loading: boolean;
+  onClose: () => void;
+  detailOpen: boolean;
 }) {
   return (
     <section className="panel result-panel">
       <div className="result-head">
         <SectionTitle title="策略结果" />
-        {runId && result && (
-          <a
-            className="icon-button link-button"
-            href={`/api/runs/${runId}/files/${result.event_id}`}
-            target="_blank"
-            rel="noreferrer"
-          >
-            <Download size={18} />
-            JSON
-          </a>
-        )}
+        <div className="result-head-actions">
+          {runId && result && (
+            <a
+              className="icon-button link-button"
+              href={`/api/runs/${runId}/files/${result.event_id}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              <Download size={18} />
+              JSON
+            </a>
+          )}
+          {payload && detailOpen && (
+            <button
+              type="button"
+              className="icon-button close-strategy"
+              onClick={onClose}
+              title="关闭当前策略"
+              aria-label="关闭当前策略"
+            >
+              <X size={18} />
+            </button>
+          )}
+        </div>
       </div>
       {loading && <div className="empty-state">加载中</div>}
-      {!loading && !payload && <div className="empty-state">选择一个结果查看详情</div>}
-      {!loading && payload && result && (
+      {!loading && !detailOpen && (
+        <div className="empty-state">
+          {run
+            ? "策略已关闭；点击运行历史中的条目或重新发起任务可再次查看。"
+            : "选择一个结果查看详情"}
+        </div>
+      )}
+      {!loading && detailOpen && !payload && (
+        <div className="empty-state">选择一个结果查看详情</div>
+      )}
+      {!loading && detailOpen && payload && result && (
         <div className="detail-stack">
           <div className="summary-band">
             <div>
               <span>事件</span>
               <strong>{String(payload["事件名称"] ?? "-")}</strong>
-            </div>
-            <div>
-              <span>格式</span>
-              <strong>{String(payload["输出格式版本"] ?? "-")}</strong>
             </div>
             {run?.elapsed_seconds != null && (
               <div>
@@ -151,6 +173,17 @@ export function ResultPanel({
                 src={`/api/runs/${runId}/image`}
                 alt="识别原图"
               />
+              {(() => {
+                const ocr = payload["图识别结果"] as
+                  | Record<string, unknown>
+                  | undefined;
+                return ocr?.text ? (
+                  <div className="image-ocr-text">
+                    <div className="image-preview-head">识别文本</div>
+                    <pre className="ocr-text-body">{String(ocr.text)}</pre>
+                  </div>
+                ) : null;
+              })()}
             </div>
           )}
 
@@ -261,6 +294,7 @@ function CrossPlatformDetail({
               五维调度策略: active["五维调度策略"] as Record<string, unknown>,
             }}
           />
+          <SupportNodePanel payload={active as Record<string, unknown>} />
         </div>
       ) : null}
     </div>
@@ -654,7 +688,7 @@ function CrossPlatformOverview({ payload }: { payload: Record<string, unknown> }
   return (
     <section className="result-section highlight">
       <h3>跨平台分发总览</h3>
-      <div className="summary-band">
+      <div className="summary-band no-wrap">
         <div>
           <span>分发的平台数</span>
           <strong>{Number(overview["平台数"] ?? 0)}</strong>
@@ -671,10 +705,12 @@ function CrossPlatformOverview({ payload }: { payload: Record<string, unknown> }
           <span>去重后人数</span>
           <strong>{Number(overview["去重数字人数"] ?? 0)}</strong>
         </div>
-        <div>
-          <span>合格缺口合计</span>
-          <strong>{Number(overview["合格缺口合计"] ?? 0)}</strong>
-        </div>
+        {Number(overview["合格缺口合计"] ?? 0) > 0 && (
+          <div>
+            <span>合格缺口合计</span>
+            <strong>{Number(overview["合格缺口合计"] ?? 0)}</strong>
+          </div>
+        )}
       </div>
       {overlaps.length > 0 && (
         <>
@@ -707,6 +743,7 @@ function CrossPlatformOverview({ payload }: { payload: Record<string, unknown> }
               <FiveDimension
                 payload={{ 五维调度策略: p["五维调度策略"] as Record<string, unknown> }}
               />
+              <SupportNodePanel payload={p as Record<string, unknown>} />
             </section>
           );
         })}

@@ -44,11 +44,6 @@ export function MultiUserScenario(props: SharedScenarioProps) {
 
   return (
     <form className="stack" onSubmit={handleSubmit}>
-      <div className="scenario-hint">
-        在一个模拟平台上选出多角色数字人小队（首发 / 互动 / 扩散 / 支持），
-        共同完成本次事件的全链路模拟分发。
-      </div>
-
       <label className="wide">
         分发平台（多人在此平台内协同）
         <select

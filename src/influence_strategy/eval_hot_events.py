@@ -692,6 +692,8 @@ def run_hot_event_multiplatform_evaluations(
     use_llm: bool = True,
     llm_client: Any | None = None,
     trace_dir: str | Path | None = None,
+    water_army_enabled: bool = False,
+    water_army_count: int = 0,
     recall_size: int = 200,
     recall_mode: Literal["platform_aware"] = "platform_aware",
 ) -> list[tuple[Path, dict[str, Any]]]:
@@ -736,6 +738,8 @@ def run_hot_event_multiplatform_evaluations(
             use_llm=use_llm,
             llm_client=llm_client,
             trace_dir=run_dirs.trace_dir,
+            water_army_enabled=water_army_enabled,
+            water_army_count=water_army_count,
             recall_size=recall_size,
             recall_mode=recall_mode,
         )
@@ -756,6 +760,8 @@ def _run_single_platform_evaluation(
     max_frequency_per_day: int,
     allowed_platforms: list[str] | None,
     use_llm: bool,
+    water_army_enabled: bool = False,
+    water_army_count: int = 0,
     recall_size: int,
     recall_mode: str,
 ) -> dict[str, Any]:
@@ -787,6 +793,8 @@ def _run_single_platform_evaluation(
         llm_client=client,
         trace_dir=trace_dir,
         dispatch_platform=spec.platform_key,
+        water_army_enabled=water_army_enabled,
+        water_army_count=water_army_count,
         recall_size=recall_size,
         recall_mode=recall_mode,
     )
@@ -804,6 +812,8 @@ def _run_single_platform_evaluation(
         "stage_times": per_stage,
         "json_output_path": str(_),
         "五维调度策略": strategy,
+        # 特殊支持节点（若有）：逐平台独立生成，随各平台结果一并返回，供跨平台 UI 渲染。
+        "特殊支持节点": platform_payload.get("特殊支持节点"),
     }
 
 
@@ -822,6 +832,8 @@ def _run_hot_event_multiplatform_evaluation(
     use_llm: bool = True,
     llm_client: Any | None = None,
     trace_dir: str | Path,
+    water_army_enabled: bool = False,
+    water_army_count: int = 0,
     recall_size: int = 200,
     recall_mode: Literal["platform_aware"] = "platform_aware",
 ) -> tuple[Path, dict[str, Any], dict[str, float]]:
@@ -842,6 +854,14 @@ def _run_hot_event_multiplatform_evaluation(
     total_start = time.perf_counter()
     platform_tag = "-".join(spec.platform_key for spec in platform_specs)
 
+    # 图识别耗时：由上游 image/text-image 任务写入事件元数据，这里并入模块耗时。
+    # 跨平台是把同一事件拆给各平台并行跑，OCR 整轮只做一次、各平台共享同一 hot_event，
+    # 因此直接取一次即可，否则外层 stage_times 缺这行、前端「!」浮窗的「图识别」会消失，
+    # 表现为"跨平台分发没完成图片识别"。
+    ocr_meta = hot_event.get("image_recognition")
+    if isinstance(ocr_meta, dict) and ocr_meta.get("ocr_seconds") is not None:
+        stage_times["image_recognition"] = float(ocr_meta["ocr_seconds"])
+
     common = dict(
         workspace_root=root,
         hot_event=hot_event,
@@ -851,6 +871,8 @@ def _run_hot_event_multiplatform_evaluation(
         max_frequency_per_day=max_frequency_per_day,
         allowed_platforms=allowed_platforms,
         use_llm=use_llm,
+        water_army_enabled=water_army_enabled,
+        water_army_count=water_army_count,
         recall_size=recall_size,
         recall_mode=recall_mode,
     )
@@ -3054,17 +3076,18 @@ def _run_hot_event_evaluation(
     stage_times["hot_event_to_payload"] = time.perf_counter() - t0
 
     # 召回开关归一化：
-    #   1) 单人 target_user_id 是「强制唯一节点」，不存在候选池概念 → 关掉；
-    #   2) recall_size <= 0 → 视作关闭，统一归一成 None，
-    #      避免下游拿到 0 这种「半开」状态。
-    effective_recall_size = (
-        recall_size
-        if target_user_id is None and recall_mode and recall_size > 0
-        else None
-    )
-    effective_recall_mode = (
-        recall_mode if effective_recall_size is not None else None
-    )
+    #   单人/定向模式（target_user_id 存在）也要开召回——只召回与目标相关的小批量节点，
+    #   并强制包含目标节点本身，避免在全部 3.5 万节点上建特征/打分（否则单人分发反而比
+    #   多人慢，见 feature_builder 注释：recall 关时 N=35,636）。多模式保持原逻辑不变。
+    _SINGLE_TARGET_RECALL_SIZE = 200
+    _recall_on = bool(recall_mode) and (recall_size or 0) > 0
+    if target_user_id is not None:
+        # 单人/定向：收敛到小批量召回，并强制纳入目标节点。
+        effective_recall_size = recall_size if _recall_on else _SINGLE_TARGET_RECALL_SIZE
+    else:
+        effective_recall_size = recall_size if _recall_on else None
+    effective_recall_mode = recall_mode if effective_recall_size is not None else None
+    include_user_ids = {target_user_id} if target_user_id else None
 
     pipeline = StrategyPipeline(product_name="abc_reading")
     artifacts = pipeline.run_with_artifacts(
@@ -3081,6 +3104,7 @@ def _run_hot_event_evaluation(
         water_army_count=water_army_count,
         recall_size=effective_recall_size,
         recall_mode=effective_recall_mode,
+        include_user_ids=include_user_ids,
     )
     # 把 pipeline 子键展开成顶层键，便于压测面板直接拿 event_parser/feature_builder/...
     for key, value in artifacts.stage_times.items():
@@ -3124,6 +3148,11 @@ def _run_hot_event_evaluation(
         selection_status=selection_status,
     )
     stage_times["write_trace"] = time.perf_counter() - t0
+
+    # 图识别结果：把上游 image/text-image 任务写入事件的 OCR 元信息（含识别文本与耗时）
+    # 一并带出，供前端「识别原图」旁回显"识别到了什么"，让识图效果可见。
+    if hot_event.get("image_recognition") is not None:
+        output_payload["图识别结果"] = hot_event["image_recognition"]
 
     stage_times["event_total"] = time.perf_counter() - total_start
     # 图识别耗时：由上游 image/text-image 任务写入事件元数据，这里并入模块耗时，
