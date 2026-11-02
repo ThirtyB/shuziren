@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronDown, History, Loader2, RefreshCcw, Trash2 } from "lucide-react";
-import type { BenchmarkHistoryItem, BenchmarkState } from "../types";
-import { deleteBenchmark, listBenchmarks } from "../lib/api";
+import type { TestRunHistoryItem, TestRunState } from "../types";
+import { deleteTestRun, listTestRuns } from "../lib/api";
 import { errorMessage } from "../lib/options";
 
-const STATE_LABEL: Record<BenchmarkState, string> = {
+const STATE_LABEL: Record<TestRunState, string> = {
   queued: "排队中",
   running: "测试中",
   completed: "完成",
@@ -12,31 +12,21 @@ const STATE_LABEL: Record<BenchmarkState, string> = {
 };
 
 /**
- * 测试历史面板（压测专用列表，和主控制台的"运行历史"完全隔离）。
- *
- * 与 ``RunHistoryPanel`` 的关键差别：**进行中会持续轮询**。
- *
- *  * 压测是异步任务：点一次按钮立刻落一条 ``queued`` 记录，历史列表里马上
- *    能看到"排队中 / 测试中"和 ``已完成轮数 / 总轮数``；
- *  * 只要列表里还有未结束的测试，就每 2s 拉一次 ``GET /api/benchmarks``，
- *    让进度与"测试中"字样实时更新；全部结束后自动停轮询；
- *  * 因此用户可以连续点多次"开始测试"（不锁按钮），新任务会排队并在列表里
- *    以"排队中"出现。
+ * 测试历史面板（总体测试专用列表，和主控制台的"运行历史"完全隔离）。
+ * 只要有未结束的测试就每 2s 轮询，全部结束后自动停。
  */
-export function BenchmarkHistoryPanel({
+export function TestRunHistoryPanel({
   activeId,
   onSelect,
   refreshTick,
   onAfterDelete,
 }: {
   activeId: string;
-  onSelect: (item: BenchmarkHistoryItem) => void;
-  /** 父组件的"数据版本号"：提交新测试 / 手动刷新时 +1。 */
+  onSelect: (item: TestRunHistoryItem) => void;
   refreshTick: number;
-  /** 删完一条后回调；父组件用来更新 activeId（如果删的正是它）。 */
-  onAfterDelete?: (deletedId: string, remaining: BenchmarkHistoryItem[]) => void;
+  onAfterDelete?: (deletedId: string, remaining: TestRunHistoryItem[]) => void;
 }) {
-  const [items, setItems] = useState<BenchmarkHistoryItem[]>([]);
+  const [items, setItems] = useState<TestRunHistoryItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [open, setOpen] = useState(true);
@@ -49,7 +39,7 @@ export function BenchmarkHistoryPanel({
     inFlightRef.current = true;
     setLoading(true);
     try {
-      setItems(await listBenchmarks());
+      setItems(await listTestRuns());
       setError("");
     } catch (err) {
       setError(errorMessage(err));
@@ -63,30 +53,25 @@ export function BenchmarkHistoryPanel({
     void refreshNow();
   }, [refreshTick, manualTick, refreshNow]);
 
-  const hasActive = items.some(
-    (item) => item.state === "queued" || item.state === "running",
-  );
+  const hasActive = items.some((item) => item.state === "queued" || item.state === "running");
 
-  // 有测试在跑（或排队）时才轮询；全部结束自动停下。
   useEffect(() => {
     if (!hasActive) return;
     const timer = window.setInterval(() => void refreshNow(), 2000);
     return () => window.clearInterval(timer);
   }, [hasActive, refreshNow]);
 
-  async function handleDelete(entry: BenchmarkHistoryItem, event: React.MouseEvent) {
+  async function handleDelete(entry: TestRunHistoryItem, event: React.MouseEvent) {
     event.stopPropagation();
     if (pendingDelete) return;
-    const ok = window.confirm(
-      `确认删除测试 ${entry.benchmark_id}？\n\n将一并删除 outputs/web_runs/benchmark_runs/${entry.benchmark_id}/。`,
-    );
+    const ok = window.confirm(`确认删除测试 ${entry.test_run_id}？`);
     if (!ok) return;
-    setPendingDelete(entry.benchmark_id);
+    setPendingDelete(entry.test_run_id);
     try {
-      await deleteBenchmark(entry.benchmark_id);
-      const remaining = items.filter((item) => item.benchmark_id !== entry.benchmark_id);
+      await deleteTestRun(entry.test_run_id);
+      const remaining = items.filter((item) => item.test_run_id !== entry.test_run_id);
       setItems(remaining);
-      onAfterDelete?.(entry.benchmark_id, remaining);
+      onAfterDelete?.(entry.test_run_id, remaining);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -104,10 +89,10 @@ export function BenchmarkHistoryPanel({
       ) : (
         <ul className="benchmark-history-list">
           {items.map((item) => {
-            const active = item.benchmark_id === activeId;
+            const active = item.test_run_id === activeId;
             const busy = item.state === "queued" || item.state === "running";
             return (
-              <li key={item.benchmark_id}>
+              <li key={item.test_run_id}>
                 <div
                   role="option"
                   aria-selected={active}
@@ -116,17 +101,12 @@ export function BenchmarkHistoryPanel({
                 >
                   <span className={`state-dot state-${item.state}`} aria-hidden />
                   <span className="benchmark-history-main">
-                    <span className="benchmark-history-label">
-                      {item.label || item.benchmark_id}
-                    </span>
-                    <span className="benchmark-history-sub mono">{item.benchmark_id}</span>
+                    <span className="benchmark-history-label">{item.label || item.test_run_id}</span>
+                    <span className="benchmark-history-sub mono">{item.test_run_id}</span>
                   </span>
                   <span className="benchmark-history-tags">
-                    <span className={item.use_llm ? "status-chip llm-yes" : "status-chip llm-no"}>
-                      {item.use_llm ? "LLM" : "无LLM"}
-                    </span>
                     <span className="benchmark-history-progress">
-                      {item.completed + item.failed}/{item.iterations}
+                      {item.completed + item.failed}/{item.total_subtasks}
                     </span>
                   </span>
                   <span className="benchmark-history-time">{formatTime(item.created_at)}</span>
@@ -138,14 +118,10 @@ export function BenchmarkHistoryPanel({
                     type="button"
                     className="run-history-delete"
                     title={busy ? "测试中无法删除" : "删除这条测试记录"}
-                    disabled={pendingDelete === item.benchmark_id || busy}
+                    disabled={pendingDelete === item.test_run_id || busy}
                     onClick={(event) => handleDelete(item, event)}
                   >
-                    {pendingDelete === item.benchmark_id ? (
-                      <Loader2 className="spin" size={14} />
-                    ) : (
-                      <Trash2 size={14} />
-                    )}
+                    {pendingDelete === item.test_run_id ? <Loader2 className="spin" size={14} /> : <Trash2 size={14} />}
                   </button>
                 </div>
               </li>
@@ -158,11 +134,7 @@ export function BenchmarkHistoryPanel({
 
   return (
     <div className="run-history">
-      <button
-        type="button"
-        className="run-history-head"
-        onClick={() => setOpen((value) => !value)}
-      >
+      <button type="button" className="run-history-head" onClick={() => setOpen((value) => !value)}>
         <span className="run-history-title">
           <History size={16} />
           测试历史

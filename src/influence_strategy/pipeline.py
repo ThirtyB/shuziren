@@ -99,6 +99,8 @@ class StrategyPipeline:
         recall_size: int | None = None,
         recall_mode: Literal["platform_aware"] | None = None,
         include_user_ids: set[str] | None = None,
+        # 跨平台优化：主线程预计算好、与平台无关的全量中间结果，注入后各平台线程不再重算 35k。
+        event_intermediates: dict[str, Any] | None = None,
     ) -> PipelineArtifacts:
         client = llm_client
         if client is None and use_llm:
@@ -131,6 +133,7 @@ class StrategyPipeline:
             recall_mode=recall_mode,
             dispatch_platform=dispatch_platform,
             include_user_ids=include_user_ids,
+            event_intermediates=event_intermediates,
         )
         stage_times["feature_builder"] = time.perf_counter() - t0
 

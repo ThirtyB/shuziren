@@ -32,31 +32,27 @@ from .eval_hot_events import (
 )
 from .image_event_loader import SUPPORTED_IMAGE_SUFFIXES, load_image_events
 from .ocr_recognizer import run_ocr
-from .llm_client import LLMClientError, OpenAICompatibleLLMClient
 from .platform_dispatcher import PlatformSpec, to_json_dict
+from .data_loader import DataLoader
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_EVENTS_PATH = PROJECT_ROOT / "eval" / "hot_event_opinion_variants_200.json"
 WEB_RUNS_ROOT = PROJECT_ROOT / "outputs" / "web_runs"
-BENCHMARK_RUNS_ROOT = WEB_RUNS_ROOT / "benchmark_runs"
-# LLM 往返延迟测试单独落盘：它只测"发出请求 → 收到响应"这一段，与压测不是同一
-# 类结果，混进压测历史会让两者都难以解读。
-LLM_LATENCY_ROOT = WEB_RUNS_ROOT / "llm_latency_runs"
+
+# 数字人原始画像缓存：按 user_id 取回底层画像库（数据库）中的原始记录，避免每次
+# 悬停 / 点击都重新加载整个画像文件。进程内只加载一次（存原始节点，含全部字段）。
+_NODE_RAW_CACHE: dict[str, Any] | None = None
+_NODE_RAW_CACHE_ROOT: Path | None = None
+TEST_RUNS_ROOT = WEB_RUNS_ROOT / "test_runs"
 FRONTEND_DIST = PROJECT_ROOT / "web" / "frontend" / "dist"
 MAX_WORKERS = 1
-BENCHMARK_DEFAULT_ITERATIONS = 5
-LLM_LATENCY_DEFAULT_ITERATIONS = 3
 
 _RUNS: dict[str, dict[str, Any]] = {}
 _LOCK = threading.Lock()
-# 压测任务与普通 run 完全隔离：单独一份内存缓存 + 独立落盘目录，方便前端做
-# "测试历史"列表，不与主控制台的运行历史混在一起。
-_BENCHMARKS: dict[str, dict[str, Any]] = {}
-_BENCHMARK_LOCK = threading.Lock()
-# LLM 往返延迟测试：同样独立于普通 run 与压测。
-_LLM_LATENCY: dict[str, dict[str, Any]] = {}
-_LLM_LATENCY_LOCK = threading.Lock()
+# 总体测试：独立内存缓存 + 独立落盘目录，与 /api/runs 运行历史隔离。
+_TEST_RUNS: dict[str, dict[str, Any]] = {}
+_TEST_RUN_LOCK = threading.Lock()
 _EXECUTOR = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
 
@@ -111,38 +107,37 @@ class EvalRunRequest(BaseModel):
     options: RunOptions = Field(default_factory=lambda: RunOptions(event_limit=200))
 
 
-class BenchmarkRequest(BaseModel):
-    """一键 N 次压测的请求体（默认 5 轮）。
+class SubTaskSpec(BaseModel):
+    """总体测试中的一个子任务：可指定单人 / 多人 / 多平台，以及是否含图、跑几条随机事件。"""
 
-    与 ``EvalRunRequest`` 的差别：压测**异步**执行，``POST`` 立即返回 queued 状态
-    与 ``benchmark_id``，前端凭它轮询进度；每轮自动随机抽一条互不相同的
-    hot_event，只有在显式传 ``event_id`` 时才锁定同一条事件跑 N 轮。
-    """
+    kind: Literal["single_target", "multi_user", "cross_platform"]
+    # 单人定向的两种打法（仅 single_target 生效）。
+    single_target_mode: Literal["self_operate", "attention"] = "self_operate"
+    # 单人定向必须手动指定目标数字人；多人 / 跨平台忽略。
+    target_user_id: str | None = None
+    # 数字人注意（attention）模式下引用的"原帖编号"，仅用于 @ 点名，不读取内容。
+    target_old_post_id: str | None = None
+    # 多人 / 跨平台的人数与平台配置（复用 PlatformSpec）；单人模式忽略。
+    platform_specs: list[PlatformSpec] = Field(default_factory=list)
+    # 是否含图：true 时系统从 eval/image 随机抽一张图，OCR 成事件再分发。
+    with_image: bool = False
+    # 本子任务跑几条随机事件（每条事件独立计时）。
+    event_count: int = Field(default=1, ge=1, le=50)
+    # 时间窗口：该子任务的投放窗口（小时）。
+    campaign_window_hours: int = Field(default=24, ge=1, le=168)
+    # 白库特殊支持节点（水军）：仅点赞 / 转发以放大参与人数，不计入选人上限。
+    water_army_enabled: bool = False
+    water_army_count: int = Field(default=0, ge=0, le=300)
+    # 是否启用 LLM（由顶栏开关统一控制，按子任务透传）。
+    use_llm: bool = False
 
-    options: RunOptions = Field(default_factory=RunOptions)
-    iterations: int = Field(default=BENCHMARK_DEFAULT_ITERATIONS, ge=1, le=10)
-    event_id: str | None = None
+
+class TestRunRequest(BaseModel):
+    """总体测试请求：一组有序子任务，每个子任务独立运行、各自产出计时，最后汇总。"""
+
+    subtasks: list[SubTaskSpec] = Field(default_factory=list, min_length=1)
     label: str | None = None
 
-
-class LlmLatencyRequest(BaseModel):
-    """LLM 往返延迟测试：只测"发出请求 → 收到响应"这一段时间。
-
-    与压测的区别：压测跑的是完整策略管线（事件解析 / 特征构建 / 打分 / 选人 /
-    内容生成），这里**只**把库里的一条话题交给大模型生成文案，因此计时结果就是
-    纯粹的 LLM 往返耗时，不含任何本地计算，也不受选人结果影响。
-
-    * 不传 ``event_id`` → 每次从库里**不放回**随机抽一条话题，避免重复输入命中
-      服务端缓存而失真；
-    * 传了 ``event_id`` → 锁定同一条话题跑 N 次，用于观察同一输入的耗时波动。
-
-    注意这里**不需要** ``use_llm`` 开关：本测试本身就是为了测大模型，开关关闭时
-    没有可测对象。
-    """
-
-    iterations: int = Field(default=LLM_LATENCY_DEFAULT_ITERATIONS, ge=1, le=20)
-    event_id: str | None = None
-    label: str | None = None
 
 
 class RunStatus(BaseModel):
@@ -203,6 +198,36 @@ def create_app() -> FastAPI:
             if is_ocr_available():
                 _load_engine()
         except Exception:  # noqa: BLE001 - 预加载失败不应阻止服务启动
+            pass
+
+        # 预热多平台预计算所需的 35k 用户数据 / 富画像 / 交互源，避免首个跨平台请求
+        # 在主线程串行加载（约 0.5~1s）。与 compute_event_intermediates 使用相同默认
+        # product_name（abc_reading）与 limit=None，命中同一模块级缓存；失败静默跳过。
+        try:
+            from .data_loader import DataLoader
+
+            _dl = DataLoader(workspace_root=PROJECT_ROOT)
+            _dl.load_profiles()
+            try:
+                _dl.load_enriched_graph_attributes()
+            except Exception:  # noqa: BLE001 - 富画像缺失不影响其余功能
+                pass
+            try:
+                _dl.load_interactions(limit_sources=None, limit_records_per_source=0)
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception:  # noqa: BLE001 - 预加载失败不应阻止服务启动
+            pass
+
+        # 预热跨平台进程池的 worker：让每个 worker 进程提前加载 35k 画像/富画像/交互，
+        # 把首个跨平台请求里 ~15s 的冷启动（worker 首次加载）挪到服务启动时一次性付清，
+        # 之后跨平台墙钟稳定在 ~2~3s（参见 eval_hot_events._run_hot_event_multiplatform_evaluation）。
+        # 进程池创建/预热失败均静默跳过，不影响其余功能与启动。
+        try:
+            from .eval_hot_events import _warm_platform_pool
+
+            _warm_platform_pool(PROJECT_ROOT)
+        except Exception:  # noqa: BLE001
             pass
 
     @app.get("/api/health")
@@ -294,6 +319,24 @@ def create_app() -> FastAPI:
             if str(event.get("event_id")) == event_id:
                 return event
         raise HTTPException(status_code=404, detail=f"system event not found: {event_id}")
+
+    @app.get("/api/nodes/{user_id}")
+    def get_node_raw(user_id: str) -> dict[str, Any]:
+        """返回某数字人在底层画像库（数据库）中的原始记录（全部字段）。
+
+        用于前端点击 / 悬停数字人时展示其数据库原始数据。直接返回画像文件里该
+        ``user_id`` 对应的原始节点（含所有原始字段，如简介 / 兴趣 / 平台 / 关注 /
+        邻居关系等），不做字段裁剪。进程内缓存一次加载，后续直接命中。
+        """
+        global _NODE_RAW_CACHE, _NODE_RAW_CACHE_ROOT
+        if _NODE_RAW_CACHE is None or _NODE_RAW_CACHE_ROOT != PROJECT_ROOT:
+            loader = DataLoader(workspace_root=PROJECT_ROOT)
+            _NODE_RAW_CACHE = loader._read_json(loader._preferred_profile_path())
+            _NODE_RAW_CACHE_ROOT = PROJECT_ROOT
+        raw = _NODE_RAW_CACHE.get(user_id)
+        if raw is None:
+            raise HTTPException(status_code=404, detail=f"node not found: {user_id}")
+        return raw
 
     @app.post("/api/runs/text", response_model=RunStatus)
     def run_text_event(request: TextRunRequest) -> dict[str, Any]:
@@ -425,184 +468,80 @@ def create_app() -> FastAPI:
         )
         return _read_status(status["run_id"])
 
-    @app.post("/api/benchmarks")
-    def run_benchmark(request: BenchmarkRequest) -> dict[str, Any]:
-        """一键 N 次压测（默认 5）：**异步**提交，立即返回 queued 状态。
+    @app.post("/api/test-runs")
+    def create_test_run(request: TestRunRequest) -> dict[str, Any]:
+        """提交一次"总体测试"：异步执行，立即返回 queued 状态与 test_run_id。
 
-        设计要点：
-
-        * 不阻塞请求 —— 后台线程串行跑 N 轮，前端拿 ``benchmark_id`` 后轮询
-          ``GET /api/benchmarks/{benchmark_id}``；因此用户可以在上一次测试还在
-          "测试中"的时候继续点新测试，新任务会排队（线程池 max_workers=1）。
-        * 事件随机且互不相同 —— 任务开始时就从 200 条 hot_event 里不放回地抽
-          ``iterations`` 条，保证同一组压测里每个测试点跑的都是不同事件；这样
-          阶段耗时不会被同一条事件的画像 / LLM 缓存"预热"。
-        * LLM 开关只跑当前 ``use_llm`` 的那一种；想对比开/关差异，切换顶栏
-          开关后再点一次，两次结果会各自作为一条测试历史保留。
+        每个子任务独立运行并复用现有计时（stage_times / per_platform），后台线程
+        串行跑完所有子任务后汇总；前端凭 test_run_id 轮询 GET /api/test-runs/{id}。
         """
-        options = request.options.model_copy(deep=True)
-        # 压测面板不接 run 事件，因此强制 event_limit=1。
-        options.event_limit = 1
-        if request.event_id:
-            options.event_id = request.event_id
-        _validate_dispatch_options(options)
+        if not request.subtasks:
+            raise HTTPException(status_code=400, detail="subtasks 不能为空。")
+        # 同步校验每个子任务配置（非法直接 400，不进入后台）。
+        for spec in request.subtasks:
+            _subtask_to_run_options(spec)
 
-        iterations = int(request.iterations)
-        label = (request.label or "").strip() or None
-        benchmark_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
-        benchmark_dir = BENCHMARK_RUNS_ROOT / benchmark_id
-        (benchmark_dir / "output").mkdir(parents=True, exist_ok=True)
-        (benchmark_dir / "trace").mkdir(parents=True, exist_ok=True)
-
+        test_run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        base_dir = TEST_RUNS_ROOT / _safe_run_id(test_run_id)
+        (base_dir / "output").mkdir(parents=True, exist_ok=True)
+        (base_dir / "trace").mkdir(parents=True, exist_ok=True)
         now = _now()
         payload: dict[str, Any] = {
-            "benchmark_id": benchmark_id,
-            "label": label,
+            "test_run_id": test_run_id,
+            "label": (request.label or "").strip() or None,
             "state": "queued",
-            "iterations": iterations,
+            "total_subtasks": len(request.subtasks),
             "completed": 0,
             "failed": 0,
-            "successful_iterations": 0,
-            "failed_iterations": 0,
-            "options": options.model_dump(mode="json"),
-            "events": [],
-            "runs": [],
+            "subtasks": [],
             "summary": None,
-            "output_dir": str(benchmark_dir),
+            "output_dir": str(base_dir),
             "created_at": now,
             "updated_at": now,
             "error": None,
         }
-        _write_benchmark(benchmark_id, payload)
-
-        _EXECUTOR.submit(
-            _benchmark_job_wrapper,
-            benchmark_id,
-            options,
-            iterations,
-            request.event_id,
-        )
+        _write_test_run(test_run_id, payload)
+        _EXECUTOR.submit(_test_run_job_wrapper, test_run_id, request)
         return dict(payload)
 
-    @app.get("/api/benchmarks")
-    def list_benchmarks() -> dict[str, Any]:
-        """测试历史列表（压测专用，与 ``/api/runs`` 完全隔离）。
-
-        内存缓存优先（刚提交还在排队 / 运行中的任务不在磁盘上完整），磁盘兜底
-        （服务重启后仍能看到历史）。按创建时间倒序。
-        """
-        BENCHMARK_RUNS_ROOT.mkdir(parents=True, exist_ok=True)
+    @app.get("/api/test-runs")
+    def list_test_runs() -> dict[str, Any]:
+        """总体测试历史列表（与 /api/runs 完全隔离）。"""
+        TEST_RUNS_ROOT.mkdir(parents=True, exist_ok=True)
         merged: dict[str, dict[str, Any]] = {}
-        for path in BENCHMARK_RUNS_ROOT.glob("*/benchmark.json"):
+        for path in TEST_RUNS_ROOT.glob("*/test_run.json"):
             try:
                 stored = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 continue
-            key = str(stored.get("benchmark_id") or path.parent.name)
-            merged[key] = _normalize_benchmark_payload(stored)
-        with _BENCHMARK_LOCK:
-            merged.update({key: dict(value) for key, value in _BENCHMARKS.items()})
-
-        items = [_benchmark_history_item(payload) for payload in merged.values()]
+            key = str(stored.get("test_run_id") or path.parent.name)
+            merged[key] = stored
+        with _TEST_RUN_LOCK:
+            merged.update({key: dict(value) for key, value in _TEST_RUNS.items()})
+        items = [_test_run_history_item(payload) for payload in merged.values()]
         items.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
-        return {"benchmarks": items[:50]}
+        return {"test_runs": items[:50]}
 
-    @app.get("/api/benchmarks/{benchmark_id}")
-    def get_benchmark(benchmark_id: str) -> dict[str, Any]:
-        """单条测试详情（含每轮 stage_times / summary），供前端轮询。"""
-        return _read_benchmark(benchmark_id)
+    @app.get("/api/test-runs/{test_run_id}")
+    def get_test_run(test_run_id: str) -> dict[str, Any]:
+        """单条总体测试详情（含每子任务 stage_times / summary），供前端轮询。"""
+        return _read_test_run(test_run_id)
 
-    @app.delete("/api/benchmarks/{benchmark_id}")
-    def delete_benchmark(benchmark_id: str) -> dict[str, Any]:
-        """删除一条测试历史（磁盘目录 + 内存缓存）。
-
-        "测试中"的任务拒绝删除：后台线程仍在往该目录写 ``benchmark.json``。
-        """
-        payload = _read_benchmark(benchmark_id)
+    @app.delete("/api/test-runs/{test_run_id}")
+    def delete_test_run(test_run_id: str) -> dict[str, Any]:
+        payload = _read_test_run(test_run_id)
         if str(payload.get("state")) in {"queued", "running"}:
             raise HTTPException(
                 status_code=409,
-                detail=f"测试 {benchmark_id} 仍在进行（state={payload.get('state')}），请等待结束后再删除。",
+                detail=f"测试 {test_run_id} 仍在进行（state={payload.get('state')}），请等待结束后再删除。",
             )
-        benchmark_dir = _benchmark_dir(benchmark_id)
-        if benchmark_dir.exists():
-            shutil.rmtree(benchmark_dir)
-        with _BENCHMARK_LOCK:
-            _BENCHMARKS.pop(benchmark_id, None)
-        return {"deleted": True, "benchmark_id": benchmark_id}
+        base_dir = _test_run_dir(test_run_id)
+        if base_dir.exists():
+            shutil.rmtree(base_dir)
+        with _TEST_RUN_LOCK:
+            _TEST_RUNS.pop(test_run_id, None)
+        return {"deleted": True, "test_run_id": test_run_id}
 
-    @app.post("/api/llm-latency")
-    def run_llm_latency(request: LlmLatencyRequest) -> dict[str, Any]:
-        """LLM 往返延迟测试：**异步**提交，立即返回 queued 状态。
-
-        只做一件事 —— 把库里的一条话题交给大模型生成文案，记录"发出请求 → 收到
-        响应"的耗时。不经过选人 / 打分 / 策略生成等任何本地计算，所以计时结果
-        可以直接反映大模型本身的响应速度。
-
-        与压测一样走后台线程池（串行排队），前端拿 ``latency_id`` 轮询
-        ``GET /api/llm-latency/{latency_id}``；可以连续提交多次，新的自动排队。
-        """
-        latency_id = f"{_timestamp_id()}_{uuid.uuid4().hex[:8]}"
-        payload: dict[str, Any] = {
-            "latency_id": latency_id,
-            "label": request.label or "LLM 延迟",
-            "state": "queued",
-            "iterations": request.iterations,
-            "event_id": request.event_id,
-            "completed": 0,
-            "failed": 0,
-            "calls": [],
-            "summary": {},
-            "created_at": _now(),
-            "updated_at": _now(),
-        }
-        _write_llm_latency(latency_id, payload)
-        _EXECUTOR.submit(
-            _llm_latency_job_wrapper,
-            latency_id,
-            request.iterations,
-            request.event_id,
-        )
-        return dict(payload)
-
-    @app.get("/api/llm-latency")
-    def list_llm_latency() -> dict[str, Any]:
-        """LLM 延迟测试的历史列表（磁盘 + 内存合并，与压测历史隔离）。"""
-        merged: dict[str, dict[str, Any]] = {}
-        if LLM_LATENCY_ROOT.exists():
-            for path in sorted(LLM_LATENCY_ROOT.glob("*/latency.json"), reverse=True):
-                try:
-                    stored = _load_json(path)
-                except (OSError, json.JSONDecodeError):
-                    continue
-                key = str(stored.get("latency_id") or path.parent.name)
-                merged[key] = stored
-        with _LLM_LATENCY_LOCK:
-            merged.update({key: dict(value) for key, value in _LLM_LATENCY.items()})
-        items = [_llm_latency_history_item(payload) for payload in merged.values()]
-        items.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
-        return {"items": items[:50]}
-
-    @app.get("/api/llm-latency/{latency_id}")
-    def get_llm_latency(latency_id: str) -> dict[str, Any]:
-        """单条 LLM 延迟测试详情（含每次调用耗时、话题、文案预览），供前端轮询。"""
-        return _read_llm_latency(latency_id)
-
-    @app.delete("/api/llm-latency/{latency_id}")
-    def delete_llm_latency(latency_id: str) -> dict[str, Any]:
-        """删除一条 LLM 延迟测试记录（磁盘目录 + 内存缓存）。"""
-        payload = _read_llm_latency(latency_id)
-        if str(payload.get("state")) in {"queued", "running"}:
-            raise HTTPException(
-                status_code=409,
-                detail=f"测试 {latency_id} 仍在进行（state={payload.get('state')}），请等待结束后再删除。",
-            )
-        latency_dir = _llm_latency_dir(latency_id)
-        if latency_dir.exists():
-            shutil.rmtree(latency_dir)
-        with _LLM_LATENCY_LOCK:
-            _LLM_LATENCY.pop(latency_id, None)
-        return {"deleted": True, "latency_id": latency_id}
 
     @app.get("/api/runs")
     def list_runs() -> dict[str, Any]:
@@ -763,11 +702,10 @@ def _normalize_hot_event(event: dict[str, Any]) -> dict[str, Any]:
 def _pick_random_hot_events(
     hot_events: list[dict[str, Any]], *, count: int
 ) -> list[dict[str, Any]]:
-    """从 200 条 hot_event 集合里**不放回**地随机抽 ``count`` 条用于压测。
+    """从 hot_event 集合里**不放回**地随机抽 ``count`` 条事件。
 
-    用于 ``/api/benchmarks``：一次测试里每个测试点跑的都是不同事件，避免同一
-    事件的画像 / LLM 缓存被"预热"后拉低后续轮次耗时，从而更准确地反映 LLM
-    开关 / 分发配置差异。
+    用于总体测试：一次测试里每个子任务的事件尽量互不相同，避免同一事件的
+    画像 / LLM 缓存被"预热"后拉低后续轮次耗时，从而更准确地反映配置差异。
 
     - 当集合为空时返回 ``[]``，由上层抛 404；
     - ``count`` 超过集合大小时返回全部（不放回，因此不会有重复）。
@@ -1110,6 +1048,8 @@ def _result_summary(
         "event_name": payload.get("事件名称", event_id),
         "dispatch_mode": dispatch_mode,
         "json_output_path": str(output_path),
+        # 单次事件的完整五维调度策略产物：前端「具体结果」卡片直接展开查看。
+        "strategy_output": payload,
         # 阶段耗时：键名稳定，缺省为空 dict；前端用 0 做兜底展示。
         "stage_times": dict(stage_times) if stage_times else {},
     }
@@ -1339,14 +1279,15 @@ def _collect_trace_files(trace_dir: Path, prefix: str = "") -> list[dict[str, An
     return files
 
 
-def _summarize_benchmark(
+def _aggregate_stage_timings(
     *, iterations: int, results: list[dict[str, Any]]
 ) -> dict[str, Any]:
-    """汇总 5 次压测结果：各阶段平均 / 总用时 / 每次迭代总用时。
+    """汇总一组运行结果的阶段耗时：各阶段平均 / 总用时 / 每次迭代总用时。
 
-    输入 ``results`` 是 ``run_benchmark`` 累积的迭代列表；只统计 ``ok=True`` 的轮。
-    输出结构是前端 5 次压测面板直接消费的形状（含 ``stage_averages`` /
-    ``stage_min_max`` / ``per_iteration_total`` 等）。
+    输入 ``results`` 是各次运行（事件 / 子任务轮次）的列表，每项含
+    ``ok`` / ``stage_times`` / ``elapsed_seconds``；只统计 ``ok=True`` 的项。
+    输出结构可直接被前端汇总面板消费（含 ``stage_averages`` / ``stage_min_max`` /
+    ``per_iteration`` 等）。复用既有计时字段，不新增任何计时测量。
     """
     ok_results = [item for item in results if item.get("ok")]
     # 只统计"已明确失败"的轮次；未跑完的轮次不算失败（异步任务会边跑边更新，
@@ -1361,7 +1302,8 @@ def _summarize_benchmark(
         iteration_index = int(item.get("iteration", 0))
         stage_times = item.get("stage_times") or {}
         for stage, duration in stage_times.items():
-            stage_samples.setdefault(stage, []).append(float(duration))
+            if isinstance(duration, (int, float)):
+                stage_samples.setdefault(stage, []).append(float(duration))
         event_total = float(item.get("elapsed_seconds", 0.0))
         per_iteration_total.append(event_total)
         per_iteration_iteration.append(iteration_index)
@@ -1397,114 +1339,65 @@ def _summarize_benchmark(
     }
 
 
-# --- 压测（benchmark）任务：内存缓存 + 独立落盘目录 + 后台线程 ---
+# --- 总体测试（test-run）：多子任务组合批量评测，复用现有计时与运行函数 ---
 
 
-def _benchmark_dir(benchmark_id: str) -> Path:
-    return BENCHMARK_RUNS_ROOT / _safe_run_id(benchmark_id)
+def _test_run_dir(test_run_id: str) -> Path:
+    return TEST_RUNS_ROOT / _safe_run_id(test_run_id)
 
 
-def _benchmark_path(benchmark_id: str) -> Path:
-    return _benchmark_dir(benchmark_id) / "benchmark.json"
+def _test_run_path(test_run_id: str) -> Path:
+    return _test_run_dir(test_run_id) / "test_run.json"
 
 
-def _read_benchmark(benchmark_id: str) -> dict[str, Any]:
-    """读一条压测状态：内存优先，磁盘兜底（服务重启后依然能看到历史）。"""
-    with _BENCHMARK_LOCK:
-        cached = _BENCHMARKS.get(benchmark_id)
-        if cached is not None:
-            return dict(cached)
-    path = _benchmark_path(benchmark_id)
-    if not path.exists():
-        raise HTTPException(status_code=404, detail=f"Benchmark not found: {benchmark_id}")
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise HTTPException(
-            status_code=500, detail=f"Benchmark 状态文件损坏: {benchmark_id}"
-        ) from exc
-    payload = _normalize_benchmark_payload(payload)
-    with _BENCHMARK_LOCK:
-        _BENCHMARKS[benchmark_id] = payload
-    return dict(payload)
-
-
-def _normalize_benchmark_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """兼容早期"同步压测"落盘的 ``benchmark.json``（缺 state / completed / events）。
-
-    旧版是跑完才写盘的，所以缺 ``state`` 的文件一定是已完成的历史记录；
-    事件字段旧版叫 ``event``（单条），这里统一补成 ``events`` 列表。
-    """
-    normalized = dict(payload)
-    normalized.setdefault("state", "completed")
-    normalized.setdefault("completed", normalized.get("successful_iterations") or 0)
-    normalized.setdefault("failed", normalized.get("failed_iterations") or 0)
-    normalized.setdefault("error", None)
-    normalized.setdefault("updated_at", normalized.get("created_at"))
-
-    events = normalized.get("events")
-    if not events:
-        single = normalized.get("event")
-        if isinstance(single, dict) and single.get("event_id"):
-            normalized["events"] = [{"iteration": 1, **single}]
-        else:
-            normalized["events"] = []
-    runs = normalized.get("runs")
-    normalized["runs"] = runs if isinstance(runs, list) else []
-    return normalized
-
-
-def _write_benchmark(benchmark_id: str, payload: dict[str, Any]) -> None:
-    """覆盖写内存缓存与 ``benchmark.json``。
-
-    这里必须 deepcopy：``events`` / ``runs`` 是后台任务逐轮 append 的同一个
-    list，浅拷贝会让内存缓存"提前"看到后续轮次的事件（``completed`` 与实际
-    事件数对不上）。
-    """
+def _write_test_run(test_run_id: str, payload: dict[str, Any]) -> None:
     snapshot = copy.deepcopy(payload)
-    with _BENCHMARK_LOCK:
-        _BENCHMARKS[benchmark_id] = snapshot
-    path = _benchmark_path(benchmark_id)
+    with _TEST_RUN_LOCK:
+        _TEST_RUNS[test_run_id] = snapshot
+    path = _test_run_path(test_run_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _update_benchmark(benchmark_id: str, **updates: Any) -> dict[str, Any]:
-    """读-改-写：更新内存里那条压测并落盘，返回更新后的快照。
+def _read_test_run(test_run_id: str) -> dict[str, Any]:
+    with _TEST_RUN_LOCK:
+        cached = _TEST_RUNS.get(test_run_id)
+        if cached is not None:
+            return dict(cached)
+    path = _test_run_path(test_run_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Test run not found: {test_run_id}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail=f"Test run 状态文件损坏: {test_run_id}") from exc
+    with _TEST_RUN_LOCK:
+        _TEST_RUNS[test_run_id] = payload
+    return dict(payload)
 
-    每条压测只有一个后台线程在写，因此这里不做跨键加锁的复杂处理；
-    锁只用来保护 ``_BENCHMARKS`` 字典本身。
-    """
-    with _BENCHMARK_LOCK:
-        payload = dict(_BENCHMARKS.get(benchmark_id) or {})
+
+def _update_test_run(test_run_id: str, **updates: Any) -> dict[str, Any]:
+    with _TEST_RUN_LOCK:
+        payload = dict(_TEST_RUNS.get(test_run_id) or {})
         payload.update(updates)
         payload["updated_at"] = _now()
         snapshot = dict(payload)
-        _BENCHMARKS[benchmark_id] = snapshot
-    path = _benchmark_path(benchmark_id)
+        _TEST_RUNS[test_run_id] = snapshot
+    path = _test_run_path(test_run_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
     return snapshot
 
 
-def _benchmark_history_item(payload: dict[str, Any]) -> dict[str, Any]:
-    """把完整压测 payload 裁剪成"测试历史列表"需要的轻量条目。"""
+def _test_run_history_item(payload: dict[str, Any]) -> dict[str, Any]:
     summary = payload.get("summary") or {}
-    options = payload.get("options") or {}
-    events = payload.get("events") or []
     return {
-        "benchmark_id": payload.get("benchmark_id"),
+        "test_run_id": payload.get("test_run_id"),
         "label": payload.get("label"),
         "state": payload.get("state") or "running",
-        "iterations": payload.get("iterations"),
+        "total_subtasks": payload.get("total_subtasks"),
         "completed": payload.get("completed") or 0,
         "failed": payload.get("failed") or 0,
-        "successful_iterations": payload.get("successful_iterations") or 0,
-        "failed_iterations": payload.get("failed_iterations") or 0,
-        "use_llm": bool(options.get("use_llm")),
-        "dispatch_mode": options.get("dispatch_mode"),
-        "event_count": len(events),
-        "events": events,
         "created_at": payload.get("created_at"),
         "updated_at": payload.get("updated_at"),
         "total_seconds": summary.get("total_seconds"),
@@ -1514,402 +1407,296 @@ def _benchmark_history_item(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _benchmark_job_wrapper(
-    benchmark_id: str,
-    options: RunOptions,
-    iterations: int,
-    pinned_event_id: str | None,
-) -> None:
-    """后台线程入口：把压测从 queued 推进到 running → completed/failed。"""
-    try:
-        _update_benchmark(benchmark_id, state="running")
-        _run_benchmark_job(
-            benchmark_id=benchmark_id,
-            options=options,
-            iterations=iterations,
-            pinned_event_id=pinned_event_id,
-        )
-        payload = _read_benchmark(benchmark_id)
-        succeeded = int(payload.get("successful_iterations") or 0)
-        _update_benchmark(
-            benchmark_id,
-            state="completed" if succeeded > 0 else "failed",
-            error=None if succeeded > 0 else "所有轮次都失败了",
-        )
-    except Exception as exc:  # pragma: no cover - defensive boundary for background jobs
-        _update_benchmark(
-            benchmark_id, state="failed", error=f"{type(exc).__name__}: {exc}"
-        )
-
-
-def _run_benchmark_job(
-    *,
-    benchmark_id: str,
-    options: RunOptions,
-    iterations: int,
-    pinned_event_id: str | None,
-) -> None:
-    """串行跑 N 轮压测，每轮换一条事件；每轮结束都刷新一次状态供前端轮询。
-
-    事件选择策略：
-
-    * 用户显式传了 ``event_id`` → 锁定该事件跑 N 轮（用于对比稳定性）；
-    * 否则 → 一开始就**不放回**地随机抽 N 条，保证一次测试内每个测试点的事件
-      都不一样；只有当 N 超过事件总数时才退化为允许重复。
-    """
-    benchmark_dir = _benchmark_dir(benchmark_id)
-    output_root = benchmark_dir / "output"
-    trace_root = benchmark_dir / "trace"
-
-    hot_events = load_hot_events(DEFAULT_EVENTS_PATH)
-    if pinned_event_id:
-        picked = select_hot_events(hot_events, event_id=pinned_event_id, event_limit=1)
-        if not picked:
-            raise RuntimeError(f"指定的事件 ID 没有匹配到 hot_event：{pinned_event_id}")
-        selected = [picked[0]] * iterations
-    else:
-        selected = _pick_random_hot_events(hot_events, count=iterations)
-        if not selected:
-            raise RuntimeError("hot_event 集合为空，无法执行压测。")
-        while len(selected) < iterations:  # 轮数 > 事件总数时才允许重复
-            selected.append(random.choice(selected))
-
-    iteration_results: list[dict[str, Any]] = []
-    event_entries: list[dict[str, Any]] = []
-
-    for index, raw_event in enumerate(selected, start=1):
-        normalized_event = _normalize_hot_event(raw_event)
-        event_entry = {
-            "iteration": index,
-            "event_id": str(normalized_event["event_id"]),
-            "event_title": normalized_event.get("event_title"),
-            "domain": normalized_event.get("domain"),
+def _make_event_from_image(image_path: Path) -> dict[str, Any]:
+    """含图子任务：直接对随机图片跑本地 OCR，把识别文字当事件（不回匹配数据集）。"""
+    outcome = run_ocr(image_path)
+    ocr_text = "\n".join(getattr(outcome, "kept_texts", []) or []).strip()
+    if not ocr_text:
+        raise ValueError(f"OCR 未从图片识别到文字：{image_path}")
+    return _normalize_hot_event(
+        {
+            "event_id": _safe_event_id(f"image_event_{_timestamp_id()}"),
+            "domain": "general",
+            "event_title": ocr_text[:48] or "图片事件",
+            "event_summary": ocr_text,
+            "target": "引导公众理解事件影响并进行理性讨论。",
+            "is_synthetic": True,
+            "opinion_variants": [ocr_text],
+            "source_type": "image",
+            "source_image": str(image_path),
+            "image_recognition": {"method": "ocr_local", "text": ocr_text},
         }
-        event_entries.append(event_entry)
-        # 抽定就公告：让前端轮询立刻看到这一轮用的是哪条事件（显示为"测试中"）。
-        _update_benchmark(benchmark_id, events=list(event_entries))
-
-        iter_output_dir = output_root / f"iter_{index:02d}"
-        iter_trace_dir = trace_root / f"iter_{index:02d}"
-        iter_output_dir.mkdir(parents=True, exist_ok=True)
-        iter_trace_dir.mkdir(parents=True, exist_ok=True)
-
-        iteration_start = time.perf_counter()
-        try:
-            if options.dispatch_mode == "cross_platform":
-                output_path, payload, stage_times = _run_hot_event_multiplatform_evaluation(
-                    workspace_root=PROJECT_ROOT,
-                    output_dir=iter_output_dir,
-                    hot_event=normalized_event,
-                    platform_specs=list(options.platform_specs),
-                    profile_limit=options.profile_limit,
-                    max_selected_nodes=options.max_selected_nodes,
-                    risk_level=options.risk_level,
-                    campaign_window_hours=options.campaign_window_hours,
-                    max_frequency_per_day=options.max_frequency_per_day,
-                    allowed_platforms=options.allowed_platforms,
-                    use_llm=options.use_llm,
-                    trace_dir=iter_trace_dir,
-                )
-            else:
-                output_path, payload, stage_times = _run_hot_event_evaluation(
-                    workspace_root=PROJECT_ROOT,
-                    output_dir=iter_output_dir,
-                    hot_event=normalized_event,
-                    profile_limit=options.profile_limit,
-                    max_selected_nodes=options.max_selected_nodes,
-                    risk_level=options.risk_level,
-                    campaign_window_hours=options.campaign_window_hours,
-                    max_frequency_per_day=options.max_frequency_per_day,
-                    allowed_platforms=options.allowed_platforms,
-                    use_llm=options.use_llm,
-                    trace_dir=iter_trace_dir,
-                    target_user_id=options.target_user_id,
-                    dispatch_platform=options.dispatch_platform
-                    if options.dispatch_mode == "multi_user"
-                    else None,
-                )
-            elapsed = time.perf_counter() - iteration_start
-            iteration_results.append(
-                {
-                    "iteration": index,
-                    "run_id": f"{benchmark_id}_iter{index:02d}",
-                    "ok": True,
-                    "elapsed_seconds": elapsed,
-                    "stage_times": stage_times,
-                    "event": event_entry,
-                    "summary": _result_summary(
-                        output_path=output_path,
-                        payload=payload,
-                        dispatch_mode=options.dispatch_mode,
-                        stage_times=stage_times,
-                    ),
-                }
-            )
-        except Exception as exc:  # 单轮失败不影响其它轮
-            iteration_results.append(
-                {
-                    "iteration": index,
-                    "run_id": f"{benchmark_id}_iter{index:02d}",
-                    "ok": False,
-                    "elapsed_seconds": time.perf_counter() - iteration_start,
-                    "error": f"{type(exc).__name__}: {exc}",
-                    "stage_times": {},
-                    "event": event_entry,
-                    "summary": None,
-                }
-            )
-
-        # 每轮结束立即刷新：前端轮询能看到进度条与已完成的柱状数据逐步长出来。
-        succeeded = sum(1 for item in iteration_results if item["ok"])
-        failed = len(iteration_results) - succeeded
-        _update_benchmark(
-            benchmark_id,
-            completed=succeeded,
-            failed=failed,
-            successful_iterations=succeeded,
-            failed_iterations=failed,
-            events=event_entries,
-            runs=iteration_results,
-            summary=_summarize_benchmark(iterations=iterations, results=iteration_results),
-        )
-
-
-# --- LLM 往返延迟测试：独立内存缓存 + 独立落盘目录 + 后台线程 ---
-
-
-def _llm_latency_dir(latency_id: str) -> Path:
-    return LLM_LATENCY_ROOT / _safe_run_id(latency_id)
-
-
-def _llm_latency_path(latency_id: str) -> Path:
-    return _llm_latency_dir(latency_id) / "latency.json"
-
-
-def _read_llm_latency(latency_id: str) -> dict[str, Any]:
-    """读一条延迟测试状态：内存优先，磁盘兜底（服务重启后仍能看到历史）。"""
-    with _LLM_LATENCY_LOCK:
-        cached = _LLM_LATENCY.get(latency_id)
-        if cached is not None:
-            return dict(cached)
-    path = _llm_latency_path(latency_id)
-    if not path.exists():
-        raise HTTPException(status_code=404, detail=f"LLM latency not found: {latency_id}")
-    try:
-        payload = _load_json(path)
-    except (OSError, json.JSONDecodeError) as exc:
-        raise HTTPException(
-            status_code=500, detail=f"LLM 延迟测试状态文件损坏: {latency_id}"
-        ) from exc
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=500, detail=f"LLM 延迟测试状态异常: {latency_id}")
-    payload.setdefault("state", "completed")
-    payload.setdefault("calls", [])
-    with _LLM_LATENCY_LOCK:
-        _LLM_LATENCY[latency_id] = payload
-    return dict(payload)
-
-
-def _write_llm_latency(latency_id: str, payload: dict[str, Any]) -> None:
-    """覆盖写内存缓存与 ``latency.json``。
-
-    同 ``_write_benchmark`` 一样必须 deepcopy：``calls`` 是后台任务逐次 append 的
-    同一个 list，浅拷贝会让内存缓存"提前"看到后续调用。
-    """
-    snapshot = copy.deepcopy(payload)
-    with _LLM_LATENCY_LOCK:
-        _LLM_LATENCY[latency_id] = snapshot
-    path = _llm_latency_path(latency_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _update_llm_latency(latency_id: str, **updates: Any) -> dict[str, Any]:
-    """读-改-写：更新内存里那条延迟测试并落盘，返回更新后的快照。"""
-    with _LLM_LATENCY_LOCK:
-        payload = dict(_LLM_LATENCY.get(latency_id) or {})
-        payload.update(updates)
-        payload["updated_at"] = _now()
-        snapshot = dict(payload)
-        _LLM_LATENCY[latency_id] = snapshot
-    path = _llm_latency_path(latency_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
-    return snapshot
-
-
-def _llm_latency_history_item(payload: dict[str, Any]) -> dict[str, Any]:
-    """把完整 payload 裁剪成历史列表需要的轻量条目。"""
-    summary = payload.get("summary") or {}
-    return {
-        "latency_id": payload.get("latency_id"),
-        "label": payload.get("label"),
-        "state": payload.get("state") or "running",
-        "iterations": payload.get("iterations"),
-        "completed": payload.get("completed") or 0,
-        "failed": payload.get("failed") or 0,
-        "avg_seconds": summary.get("avg_seconds"),
-        "created_at": payload.get("created_at"),
-        "updated_at": payload.get("updated_at"),
-    }
-
-
-def _build_latency_prompt(event: dict[str, Any]) -> tuple[str, str]:
-    """构造"给一个话题、让大模型生成文案"的提示词。
-
-    刻意让每次调用的输入规模接近（同一套字段 + 固定的字数要求），这样测出来的
-    耗时差异主要来自大模型/网络，而不是提示词长度变化。
-    """
-    system_prompt = (
-        "你是社交媒体文案助手。请根据给定的热点话题，为一名数字人生成一条"
-        "可直接发布的中文文案。必须返回严格 JSON，不要输出 Markdown。"
     )
-    payload = {
-        "task": "根据下面的热点话题生成一条中文社交媒体文案。",
-        "topic": {
-            "event_title": event.get("event_title"),
-            "event_summary": event.get("event_summary"),
-            "domain": event.get("domain"),
-        },
-        "requirements": [
-            "post_content：文案正文，80-140 字，口语化，可直接发布。",
-            "angle：切入角度，10 字以内。",
-            "tone：语气，10 字以内。",
-            "不要编造具体数据、机构名称或当事人姓名。",
-        ],
-    }
-    return system_prompt, json.dumps(payload, ensure_ascii=False, indent=2)
 
 
-def _summarize_llm_latency(calls: list[dict[str, Any]]) -> dict[str, Any]:
-    """汇总 N 次调用的往返耗时：平均 / 最小 / 最大 / 总计。"""
-    durations = [
-        float(item["elapsed_seconds"])
-        for item in calls
-        if item.get("ok") and item.get("elapsed_seconds") is not None
-    ]
-    if not durations:
-        return {}
-    return {
-        "count": len(durations),
-        "avg_seconds": round(statistics.fmean(durations), 3),
-        "min_seconds": round(min(durations), 3),
-        "max_seconds": round(max(durations), 3),
-        "total_seconds": round(sum(durations), 3),
-    }
+def _subtask_to_run_options(spec: "SubTaskSpec") -> "RunOptions":
+    """把子任务配置映射成现有 RunOptions（严格校验，非法直接抛 400）。
 
-
-def _llm_latency_job_wrapper(
-    latency_id: str,
-    iterations: int,
-    pinned_event_id: str | None,
-) -> None:
-    """后台线程入口：把延迟测试从 queued 推进到 running → completed/failed。"""
-    try:
-        _update_llm_latency(latency_id, state="running")
-        _run_llm_latency_job(
-            latency_id=latency_id,
-            iterations=iterations,
-            pinned_event_id=pinned_event_id,
-        )
-    except Exception as exc:  # 任务级失败：整体标记 failed，已完成的调用仍然保留
-        _update_llm_latency(
-            latency_id,
-            state="failed",
-            error=f"{type(exc).__name__}: {exc}",
-        )
-
-
-def _run_llm_latency_job(
-    *,
-    latency_id: str,
-    iterations: int,
-    pinned_event_id: str | None,
-) -> None:
-    """串行发起 N 次"话题 → 文案"的大模型调用，逐次记录往返耗时。
-
-    计时只包住 ``client.generate_json``，即"请求发出 → 拿到解析后的 JSON"，正好
-    对应"发送给大模型 → 接收到大模型响应"；本地的事件解析 / 特征构建 / 打分 /
-    选人都不参与，因此这个数字可以直接反映大模型本身的响应速度。
+    各子任务只暴露用户真正要配的字段：时间窗口、特殊支持节点（水军）、LLM 开关；
+    其余运行参数（风险等级、选人上限、频率上限、可选平台等）走 RunOptions 默认值。
     """
-    client = OpenAICompatibleLLMClient.from_env_files(PROJECT_ROOT)
-    if client is None:
-        raise RuntimeError("未配置大模型（缺少 API Key 或 base_url），无法进行延迟测试。")
+    common = dict(
+        campaign_window_hours=spec.campaign_window_hours,
+        water_army_enabled=spec.water_army_enabled,
+        water_army_count=spec.water_army_count,
+        use_llm=spec.use_llm,
+    )
+    if spec.kind == "single_target":
+        if not spec.target_user_id:
+            raise HTTPException(status_code=400, detail="单人定向（single_target）必须指定 target_user_id。")
+        return RunOptions(
+            dispatch_mode="single_target",
+            target_user_id=spec.target_user_id,
+            single_target_mode=spec.single_target_mode,
+            target_old_post_id=spec.target_old_post_id,
+            platform_specs=[],  # type: ignore[list-item]
+            dispatch_platform=None,
+            max_selected_nodes=1,
+            **common,
+        )
+    if spec.kind == "multi_user":
+        dispatch_platform = spec.platform_specs[0].platform_key if spec.platform_specs else None
+        requested = spec.platform_specs[0].requested_count if spec.platform_specs else 1
+        return RunOptions(
+            dispatch_mode="multi_user",
+            dispatch_platform=dispatch_platform,
+            platform_specs=[],  # type: ignore[list-item]
+            max_selected_nodes=int(requested),
+            **common,
+        )
+    # cross_platform
+    if not spec.platform_specs:
+        raise HTTPException(status_code=400, detail="跨平台（cross_platform）必须至少指定一个 platform_specs。")
+    max_count = max((p.requested_count for p in spec.platform_specs), default=5)
+    return RunOptions(
+        dispatch_mode="cross_platform",
+        platform_specs=list(spec.platform_specs),
+        max_selected_nodes=max_count,
+        **common,
+    )
 
-    provider = None
-    model = None
-    if hasattr(client, "describe"):
-        details = client.describe() or {}
-        provider = details.get("provider")
-        model = details.get("model")
-    else:
-        provider = getattr(client, "provider", None)
-        model = getattr(client, "model", None)
-    _update_llm_latency(latency_id, provider=provider, model=model)
 
+def _run_test_run_job(*, test_run_id: str, request: "TestRunRequest") -> None:
     hot_events = load_hot_events(DEFAULT_EVENTS_PATH)
-    if pinned_event_id:
-        picked = select_hot_events(hot_events, event_id=pinned_event_id, event_limit=1)
-        if not picked:
-            raise RuntimeError(f"指定的事件 ID 没有匹配到 hot_event：{pinned_event_id}")
-        selected = [picked[0]] * iterations
-    else:
-        selected = _pick_random_hot_events(hot_events, count=iterations)
-        if not selected:
-            raise RuntimeError("hot_event 集合为空，无法执行延迟测试。")
-        while len(selected) < iterations:  # 次数超过话题总数时才允许重复
-            selected.append(random.choice(selected))
+    image_dir = PROJECT_ROOT / "eval" / "image"
+    image_paths = sorted(image_dir.glob("*.png"))
+    base_dir = _test_run_dir(test_run_id)
 
-    calls: list[dict[str, Any]] = []
-    for index, raw_event in enumerate(selected, start=1):
-        event = _normalize_hot_event(raw_event)
-        system_prompt, user_prompt = _build_latency_prompt(event)
+    subtask_results: list[dict[str, Any]] = []
+    for si, spec in enumerate(request.subtasks):
+        options = _subtask_to_run_options(spec)
+        # 抽事件：含图则随机抽一张图 OCR 成事件；否则从库里随机抽。
+        events: list[dict[str, Any]] = []
+        image_failed = False
+        for _ in range(int(spec.event_count)):
+            if spec.with_image and image_paths:
+                try:
+                    events.append(_make_event_from_image(random.choice(image_paths)))
+                    continue
+                except Exception as exc:
+                    image_failed = True
+                    subtask_results.append(
+                        {
+                            "index": si,
+                            "kind": spec.kind,
+                            "ok": False,
+                            "error": f"图片事件构建失败：{type(exc).__name__}: {exc}",
+                            "stage_times_list": [],
+                            "per_event": [],
+                            "subtask_summary": None,
+                        }
+                    )
+                    break
+            if not hot_events:
+                break
+            events.append(copy.deepcopy(random.choice(hot_events)))
 
-        started = time.perf_counter()
-        error: str | None = None
-        response_chars = 0
-        preview = ""
-        try:
-            response = client.generate_json(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-            )
-            if isinstance(response, dict):
-                response_chars = len(json.dumps(response, ensure_ascii=False))
-                post_content = response.get("post_content")
-                if isinstance(post_content, str) and post_content.strip():
-                    preview = post_content.strip()
-        except (LLMClientError, OSError, ValueError, TypeError) as exc:
-            error = f"{type(exc).__name__}: {exc}"
-        elapsed = time.perf_counter() - started
+        if not events:
+            if not image_failed:
+                subtask_results.append(
+                    {
+                        "index": si,
+                        "kind": spec.kind,
+                        "ok": False,
+                        "error": "无可用事件（库为空且无图片）",
+                        "stage_times_list": [],
+                        "per_event": [],
+                        "subtask_summary": None,
+                    }
+                )
+            _update_test_run(test_run_id, completed=si + 1, subtasks=list(subtask_results))
+            continue
 
-        calls.append(
+        sub_output = base_dir / "output" / f"sub_{si:02d}"
+        sub_trace = base_dir / "trace" / f"sub_{si:02d}"
+        sub_output.mkdir(parents=True, exist_ok=True)
+        sub_trace.mkdir(parents=True, exist_ok=True)
+
+        per_event: list[dict[str, Any]] = []
+        stage_times_list: list[dict[str, Any]] = []
+        # 每事件的真实墙钟耗时（event_total），与 per_event 卡片保持一致；
+        # 图表与总体汇总都复用这一份，避免"阶段之和"被当成计时导致不一致。
+        elapsed_list: list[float] = []
+        sub_error: str | None = None
+        for ei, ev in enumerate(events):
+            ev_out = sub_output / f"ev_{ei:02d}"
+            ev_trace = sub_trace / f"ev_{ei:02d}"
+            ev_out.mkdir(parents=True, exist_ok=True)
+            ev_trace.mkdir(parents=True, exist_ok=True)
+            try:
+                if spec.kind == "cross_platform":
+                    output_path, payload, stage_times = _run_hot_event_multiplatform_evaluation(
+                        workspace_root=PROJECT_ROOT,
+                        output_dir=ev_out,
+                        trace_dir=ev_trace,
+                        hot_event=ev,
+                        platform_specs=list(options.platform_specs),
+                        profile_limit=options.profile_limit,
+                        max_selected_nodes=options.max_selected_nodes,
+                        risk_level=options.risk_level,
+                        campaign_window_hours=options.campaign_window_hours,
+                        max_frequency_per_day=options.max_frequency_per_day,
+                        allowed_platforms=options.allowed_platforms,
+                        use_llm=options.use_llm,
+                        water_army_enabled=options.water_army_enabled,
+                        water_army_count=options.water_army_count,
+                    )
+                else:
+                    output_path, payload, stage_times = _run_hot_event_evaluation(
+                        workspace_root=PROJECT_ROOT,
+                        output_dir=ev_out,
+                        trace_dir=ev_trace,
+                        hot_event=ev,
+                        profile_limit=options.profile_limit,
+                        max_selected_nodes=options.max_selected_nodes,
+                        risk_level=options.risk_level,
+                        campaign_window_hours=options.campaign_window_hours,
+                        max_frequency_per_day=options.max_frequency_per_day,
+                        allowed_platforms=options.allowed_platforms,
+                        use_llm=options.use_llm,
+                        target_user_id=options.target_user_id,
+                        dispatch_platform=options.dispatch_platform if options.dispatch_mode == "multi_user" else None,
+                        single_target_mode=options.single_target_mode,
+                        water_army_enabled=options.water_army_enabled,
+                        water_army_count=options.water_army_count,
+                    )
+                # 统一压平成 dict[str, float]，用于聚合与前端柱状图：
+                #  - 只保留「真实子阶段」（事件解析 / 特征构建 / 选人 / 内容生成 …），
+                #    **剔除汇总项** event_total（墙钟合计）与 pipeline_total（子阶段之和），
+                #    否则柱状图会把"合计"当成一条阶段，使各阶段之和看起来翻倍。
+                #  - 跨平台：substage_totals 是各平台 per-stage 之和，除以平台数得到单平台代表值，
+                #    使各阶段之和≈墙钟，不会被并行放大成 N 倍。
+                # 耗时直接取管线自己测的 event_total（墙钟），是"这件事花了多久"的真相；
+                # 只有这样 total_seconds / 各阶段之和才与真实耗时一致，不会被并行或汇总项放大。
+                if spec.kind == "cross_platform" and isinstance(stage_times, dict):
+                    substage = stage_times.get("substage_totals") or {}
+                    per_platform = stage_times.get("per_platform") or []
+                    n_platforms = max(len(per_platform), 1)
+                    flat_stage_times = {
+                        k: float(v) / n_platforms
+                        for k, v in substage.items()
+                        if k not in ("event_total", "pipeline_total")
+                    }
+                else:
+                    flat_stage_times = {
+                        k: float(v)
+                        for k, v in (stage_times or {}).items()
+                        if k not in ("event_total", "pipeline_total")
+                    }
+                event_total_val = (
+                    float(stage_times.get("event_total", 0.0))
+                    if isinstance(stage_times, dict) and stage_times.get("event_total")
+                    else 0.0
+                )
+                elapsed_seconds = event_total_val or float(sum(flat_stage_times.values()))
+                summary = _result_summary(
+                    output_path=output_path,
+                    payload=payload,
+                    dispatch_mode=options.dispatch_mode,
+                    stage_times=flat_stage_times,
+                )
+                stage_times_list.append(flat_stage_times)
+                elapsed_list.append(elapsed_seconds)
+                per_event.append(
+                    {
+                        "event_id": str(ev.get("event_id")),
+                        "event_title": ev.get("event_title"),
+                        "stage_times": flat_stage_times,
+                        "elapsed_seconds": elapsed_seconds,
+                        "summary": summary,
+                    }
+                )
+            except Exception as exc:
+                sub_error = f"{type(exc).__name__}: {exc}"
+                stage_times_list.append({})
+                elapsed_list.append(0.0)
+                per_event.append(
+                    {
+                        "event_id": str(ev.get("event_id")),
+                        "stage_times": {},
+                        "summary": None,
+                        "error": sub_error,
+                    }
+                )
+
+        # 复用现有压测汇总：对同一子任务的各事件 stage_times 求平均。
+        # 注意：elapsed_seconds 必须用真实墙钟 event_total（与 per_event 卡片一致），
+        # 不能用 sum(stage_times) —— 那样会把"剔除了 event_total 的阶段明细"误当计时。
+        iterations = [
             {
-                "index": index,
-                "ok": error is None,
-                "elapsed_seconds": round(elapsed, 3),
-                "event_id": event.get("event_id"),
-                "event_title": event.get("event_title"),
-                "prompt_chars": len(user_prompt),
-                "response_chars": response_chars,
-                "preview": preview[:120],
-                "error": error,
+                "ok": bool(st),
+                "iteration": i,
+                "stage_times": st,
+                "elapsed_seconds": float(elapsed_list[i]),
+            }
+            for i, st in enumerate(stage_times_list)
+        ]
+        subtask_summary = _aggregate_stage_timings(iterations=len(iterations), results=iterations)
+        subtask_results.append(
+            {
+                "index": si,
+                "kind": spec.kind,
+                "single_target_mode": spec.single_target_mode,
+                "with_image": spec.with_image,
+                "target_user_id": spec.target_user_id,
+                "platform_specs": [p.model_dump() for p in spec.platform_specs],
+                "event_count": len(events),
+                "ok": sub_error is None,
+                "error": sub_error,
+                "stage_times_list": stage_times_list,
+                "event_elapsed": list(elapsed_list),
+                "per_event": per_event,
+                "subtask_summary": subtask_summary,
             }
         )
-        # 每完成一次就公告，前端轮询能立刻看到进度。
-        _update_llm_latency(
-            latency_id,
-            calls=list(calls),
-            completed=sum(1 for item in calls if item.get("ok")),
-            failed=sum(1 for item in calls if not item.get("ok")),
+        _update_test_run(
+            test_run_id,
+            completed=si + 1,
+            subtasks=list(subtask_results),
         )
 
-    _update_llm_latency(
-        latency_id,
-        state="completed",
-        calls=calls,
-        completed=sum(1 for item in calls if item.get("ok")),
-        failed=sum(1 for item in calls if not item.get("ok")),
-        summary=_summarize_llm_latency(calls),
+    # 总体汇总：跨所有子任务、所有事件。
+    flat: list[dict[str, Any]] = []
+    for st in subtask_results:
+        for stt, el in zip(st.get("stage_times_list", []), st.get("event_elapsed", [])):
+            flat.append(
+                {"ok": bool(stt), "iteration": len(flat), "stage_times": stt, "elapsed_seconds": float(el)}
+            )
+    overall_summary = _aggregate_stage_timings(iterations=len(flat), results=flat)
+    succeeded = sum(1 for st in subtask_results if st.get("ok"))
+    _update_test_run(
+        test_run_id,
+        state="completed" if succeeded > 0 else "failed",
+        failed=sum(1 for st in subtask_results if not st.get("ok")),
+        subtasks=list(subtask_results),
+        summary=overall_summary,
+        error=None if succeeded > 0 else "所有子任务都失败了",
     )
 
+
+def _test_run_job_wrapper(test_run_id: str, request: "TestRunRequest") -> None:
+    try:
+        _update_test_run(test_run_id, state="running")
+        _run_test_run_job(test_run_id=test_run_id, request=request)
+    except Exception as exc:  # pragma: no cover - 后台任务边界
+        _update_test_run(test_run_id, state="failed", error=f"{type(exc).__name__}: {exc}")

@@ -1,14 +1,11 @@
 /** HTTP 工具：把 ``fetch`` 封装为强类型的 ``fetchJson/postJson``。 */
 
 import type {
-  BenchmarkHistoryItem,
-  BenchmarkRequest,
-  BenchmarkResponse,
-  LlmLatencyHistoryItem,
-  LlmLatencyRequest,
-  LlmLatencyResponse,
   RunStatus,
   SystemEventListResponse,
+  TestRunHistoryItem,
+  TestRunRequest,
+  TestRunResponse,
 } from "../types";
 
 export async function fetchJson<T>(path: string): Promise<T> {
@@ -125,63 +122,28 @@ export async function runTextImageEvent(
 }
 
 /**
- * 提交一次压测：后端**异步**执行，这里只会拿到 state=queued 的初始状态与
- * ``benchmark_id``；真正的进度与结果要靠 ``getBenchmark`` 轮询。
+ * 提交一次"总体测试"：后端**异步**执行，这里只会拿到 state=queued 的初始状态与
+ * ``test_run_id``；真正的进度与结果要靠 ``getTestRun`` 轮询。
  *
- * 因为 POST 立即返回，前端点完按钮就能解锁，用户可以连续提交多次测试
- * （后端线程池串行排队执行）。
+ * 因为 POST 立即返回，前端可连续提交多次（后端串行排队执行）。
  */
-export async function runBenchmark(request: BenchmarkRequest): Promise<BenchmarkResponse> {
-  return postJson<BenchmarkResponse>("/api/benchmarks", request);
+export async function createTestRun(request: TestRunRequest): Promise<TestRunResponse> {
+  return postJson<TestRunResponse>("/api/test-runs", request);
 }
 
-/** 轮询单条压测的完整状态（每轮随机事件 / 阶段耗时 / 汇总）。 */
-export async function getBenchmark(benchmarkId: string): Promise<BenchmarkResponse> {
-  return fetchJson<BenchmarkResponse>(`/api/benchmarks/${encodeURIComponent(benchmarkId)}`);
+/** 轮询单条总体测试的完整状态（每个子任务 / 事件 / 阶段耗时 / 汇总）。 */
+export async function getTestRun(testRunId: string): Promise<TestRunResponse> {
+  return fetchJson<TestRunResponse>(`/api/test-runs/${encodeURIComponent(testRunId)}`);
 }
 
-/** 测试历史列表（压测专用，与 ``/api/runs`` 的运行历史隔离）。 */
-export async function listBenchmarks(): Promise<BenchmarkHistoryItem[]> {
-  const payload = await fetchJson<{ benchmarks: BenchmarkHistoryItem[] }>(
-    "/api/benchmarks",
-  );
-  return payload.benchmarks ?? [];
+/** 测试历史列表（总体测试专用，与 ``/api/runs`` 的运行历史隔离）。 */
+export async function listTestRuns(): Promise<TestRunHistoryItem[]> {
+  const payload = await fetchJson<{ test_runs: TestRunHistoryItem[] }>("/api/test-runs");
+  return payload.test_runs ?? [];
 }
 
-export async function deleteBenchmark(benchmarkId: string): Promise<void> {
-  const response = await fetch(`/api/benchmarks/${encodeURIComponent(benchmarkId)}`, {
-    method: "DELETE",
-  });
-  if (!response.ok) {
-    throw new Error(await readError(response));
-  }
-}
-
-/**
- * 提交一次 LLM 往返延迟测试：后端异步执行，这里只拿到 queued 与
- * ``latency_id``；每次调用的耗时靠 ``getLlmLatency`` 轮询。
- */
-export async function runLlmLatency(
-  request: LlmLatencyRequest,
-): Promise<LlmLatencyResponse> {
-  return postJson<LlmLatencyResponse>("/api/llm-latency", request);
-}
-
-/** 轮询单条延迟测试：每次调用的耗时、用到的话题、生成的文案预览。 */
-export async function getLlmLatency(latencyId: string): Promise<LlmLatencyResponse> {
-  return fetchJson<LlmLatencyResponse>(
-    `/api/llm-latency/${encodeURIComponent(latencyId)}`,
-  );
-}
-
-/** LLM 延迟测试的历史列表（与压测历史隔离）。 */
-export async function listLlmLatency(): Promise<LlmLatencyHistoryItem[]> {
-  const payload = await fetchJson<{ items: LlmLatencyHistoryItem[] }>("/api/llm-latency");
-  return payload.items ?? [];
-}
-
-export async function deleteLlmLatency(latencyId: string): Promise<void> {
-  const response = await fetch(`/api/llm-latency/${encodeURIComponent(latencyId)}`, {
+export async function deleteTestRun(testRunId: string): Promise<void> {
+  const response = await fetch(`/api/test-runs/${encodeURIComponent(testRunId)}`, {
     method: "DELETE",
   });
   if (!response.ok) {

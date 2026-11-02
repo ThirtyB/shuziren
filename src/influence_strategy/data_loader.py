@@ -21,6 +21,10 @@ from .models import (
 _JSON_CACHE: dict[tuple[str, int], Any] = {}
 # ``load_enriched_graph_attributes`` 的校验结果缓存：(path, mtime, limit) → dict。
 _ENRICHED_GA_CACHE: dict[tuple[str, int, int | None], dict[str, GraphAttributes]] = {}
+# ``load_profiles`` 的校验结果缓存：(path, mtime, limit) → dict[str, UserProfile]。
+# 35k 画像的 Pydantic 校验约 0.7~1.5s，多平台模式下每个平台都会跑完整管线，
+# 复用同一份已校验画像可避免 N× 重复校验（这是多平台耗时的主要来源）。
+_PROFILES_CACHE: dict[tuple[str, int, int | None], dict[str, Any]] = {}
 
 
 class DataLoader:
@@ -133,6 +137,15 @@ class DataLoader:
         selected_path = self._preferred_profile_path()
         if not selected_path.exists():
             self._ensure_file(selected_path)
+        # 已校验结果按 (路径, 修改时间, 上限) 缓存：同一进程内（含多平台并发）只校验一次。
+        try:
+            profile_mtime = int(selected_path.stat().st_mtime)
+        except OSError:
+            profile_mtime = -1
+        cache_key = (str(selected_path), profile_mtime, limit)
+        cached = _PROFILES_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
         payload = self._read_json(selected_path)
         if not isinstance(payload, dict):
             raise ValueError("Profile file must contain a JSON object.")
@@ -145,6 +158,7 @@ class DataLoader:
             item["user_id"] = str(item.get("user_id", user_id))
             item["user_name"] = item.get("user_name") or f"user_{user_id}"
             result[str(user_id)] = UserProfile.model_validate(item)
+        _PROFILES_CACHE[cache_key] = result
         return result
 
     def load_water_army_profiles(self, limit: int | None = None) -> dict[str, UserProfile]:

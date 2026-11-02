@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import collections
 import logging
 import math
 import re
@@ -158,6 +159,13 @@ def _clip_score(value: float) -> float:
     return max(0.0, min(1.0, value))
 
 
+# 跨平台共享：同一事件的全量中间结果（关键词 fuzzy / 语义画像 / BGE / 命中数）按事件缓存。
+# 多平台任务并发跑同一管线时，只在第一平台计算一次，其余直接复用，避免 N× 重复扫描 35k。
+_EVENT_INTERMEDIATE_CACHE: "collections.OrderedDict[str, dict[str, Any]]" = collections.OrderedDict()
+_EVENT_INTERMEDIATE_LOCK = threading.Lock()
+_EVENT_INTERMEDIATE_MAX = 4
+
+
 class FeatureBuilder:
     def __init__(self, product_name: str = "abc_reading") -> None:
         self.product_name = product_name
@@ -174,10 +182,20 @@ class FeatureBuilder:
         recall_mode: Literal["platform_aware"] | None = None,
         dispatch_platform: str | None = None,
         include_user_ids: set[str] | None = None,
+        # 跨平台优化：主线程预计算好、与平台无关的全量中间结果；注入后本方法不再重算 35k。
+        event_intermediates: dict[str, Any] | None = None,
+        # 跨平台优化：共享的、与平台无关的已加载输入，避免每平台重复加载/计算。
+        preloaded_profiles: dict[str, UserProfile] | None = None,
+        kw_hits_map: dict[str, int] | None = None,
+        semantic_map: dict[str, float] | None = None,
     ) -> FeatureBuildResult:
         loader = DataLoader(workspace_root, product_name=self.product_name)
         product_context = loader.load_product_context()
-        profiles = loader.load_profiles(limit=profile_limit)
+        # 复用调用方已加载 / 已校验的画像（多平台并发时各线程共享同一份，避免 N× 校验）。
+        if preloaded_profiles is not None:
+            profiles = preloaded_profiles
+        else:
+            profiles = loader.load_profiles(limit=profile_limit)
         try:
             # 用 load_enriched_graph_attributes 替代 load_enriched_profiles：
             # 只取 graph_attributes 9 个字段，跳过 neighbors 列表和
@@ -192,6 +210,23 @@ class FeatureBuilder:
         except (JSONDecodeError, ValueError):
             source_user_ids = set()
 
+        # 跨平台优化：同一事件的全量中间结果（关键词 fuzzy 匹配 / 语义画像文本 /
+        # BGE 语义分 / 关键词命中数）在 35k 节点上只算一次。若调用方已注入（主线程
+        # 预计算好），直接复用，避免多线程在 GIL 下各自重算、被放大到 ~数倍墙钟；
+        # 否则按事件缓存算一次（锁内原子，并发平台只真正算一遍）。
+        if event_intermediates is not None:
+            intermediates = event_intermediates
+        else:
+            intermediates = self._get_event_intermediates(
+                workspace_root=workspace_root,
+                profiles=profiles,
+                enriched_profiles=enriched_profiles,
+                event=event,
+                source_user_ids=source_user_ids,
+                profile_limit=profile_limit,
+                use_llm=use_llm,
+            )
+
         # ---- 召回层：仅在显式开启时跑 ----
         # 不改 ②③④ 的 LLM 逻辑；召回结果仅用于过滤 profiles / enriched_profiles，
         # 5 个全量 max_log 由 build_features 内部在过滤前计算（保证 score 等价）。
@@ -205,6 +240,8 @@ class FeatureBuilder:
                 size=recall_size,
                 source_user_ids=source_user_ids,
                 workspace_root=workspace_root,
+                kw_hits_map=intermediates["kw_hits_map"],
+                semantic_map=intermediates["semantic_map"],
             )
 
         # 强制保留指定节点（如单人定向模式的目标用户）：并入召回集合，保证其一定进入
@@ -223,6 +260,148 @@ class FeatureBuilder:
             llm_client=llm_client,
             recall_user_ids=recall_user_ids,
             recall_mode=recall_mode,
+            matched_keywords_map=intermediates["matched_keywords_map"],
+            semantic_profile_map=intermediates["semantic_profile_map"],
+            semantic_map=intermediates["semantic_map"],
+        )
+
+    # ---- 跨平台共享：同一事件只算一次的全量中间结果（按事件缓存） ----
+    def _event_intermediate_cache_key(
+        self, event: "ParsedEvent", profile_limit: int | None, use_llm: bool = False
+    ) -> str:
+        normalized = tuple(sorted(set(self._prepare_keywords(self._event_match_keywords(event)))))
+        return f"{event.event_id}|{profile_limit}|{normalized}|llm={use_llm}"
+
+    def _compute_event_intermediates(
+        self,
+        workspace_root: str | Path | None,
+        profiles: dict[str, "UserProfile"],
+        enriched_profiles: dict[str, Any],
+        event: "ParsedEvent",
+        source_user_ids: set[str] | None,
+        profile_limit: int | None,
+        use_llm: bool = False,
+    ) -> dict[str, Any]:
+        """针对单条事件，把「与平台无关」的全量计算在 35k 节点上只跑一遍。
+
+        同时产出：关键词 fuzzy 匹配表（供 build_features）、语义画像文本表（供 LLM
+        路径）、BGE 语义分（全库一次矩阵乘法）、关键词命中数（供 recall_candidates
+        的 substring 排序）。结果按事件缓存，供各平台复用，避免跨平台时每个平台都
+        重扫一遍 35k。
+        """
+        normalized_keywords = self._prepare_keywords(self._event_match_keywords(event))
+        source_set = source_user_ids or set()
+
+        matched_keywords_map: dict[str, list[str]] = {}
+        semantic_profile_map: dict[str, str] = {}
+        kw_hits_map: dict[str, int] = {}
+        for uid, p in profiles.items():
+            # build_features 用的关键词 fuzzy 匹配（rapidfuzz，原 35k 循环里最贵的一步）。
+            matched_keywords_map[uid] = self._match_keywords(
+                profile=p, normalized_keywords=normalized_keywords
+            )
+            # recall_candidates 用的关键词命中数（substring 逻辑，与其内联实现一致）。
+            desc_blob = p.user_description or ""
+            interests_blob = " ".join(p.user_interests)
+            kw_hits = 0
+            for k in normalized_keywords:
+                if not k:
+                    continue
+                if " " in k:
+                    if k in desc_blob or any(k in i for i in p.user_interests):
+                        kw_hits += 1
+                elif k in desc_blob or k in interests_blob:
+                    kw_hits += 1
+            kw_hits_map[uid] = kw_hits
+            # 语义画像文本仅 LLM 路径需要；非 LLM 时跳过 35k 次拼接，避免无谓开销
+            # （build_features 在无此表时走 else 分支，semantic_profiles 置空，行为等价）。
+            if use_llm:
+                semantic_profile_map[uid] = DataLoader.summarize_profile_for_semantics(
+                    p,
+                    enriched_profile=enriched_profiles.get(uid),
+                    is_interaction_source=uid in source_set,
+                )
+
+        semantic_map: dict[str, float] = {}
+        if workspace_root:
+            try:
+                local_models = load_local_models(workspace_root)
+                if local_models is not None:
+                    semantic_map = local_models.semantic_scores(build_event_text(event))
+            except Exception:  # pragma: no cover - 模型缺失/损坏不应中断
+                semantic_map = {}
+
+        return {
+            "matched_keywords_map": matched_keywords_map,
+            "semantic_profile_map": semantic_profile_map,
+            "kw_hits_map": kw_hits_map,
+            "semantic_map": semantic_map,
+        }
+
+    def _get_event_intermediates(
+        self,
+        workspace_root: str | Path | None,
+        profiles: dict[str, "UserProfile"],
+        enriched_profiles: dict[str, Any],
+        event: "ParsedEvent",
+        source_user_ids: set[str] | None,
+        profile_limit: int | None,
+        use_llm: bool = False,
+    ) -> dict[str, Any]:
+        key = self._event_intermediate_cache_key(event, profile_limit, use_llm)
+        with _EVENT_INTERMEDIATE_LOCK:
+            cached = _EVENT_INTERMEDIATE_CACHE.get(key)
+            if cached is not None:
+                return cached
+            # 在锁内完成一次性计算，确保并发平台（多线程）只会真正算一遍 35k，
+            # 其余直接复用缓存，避免竞态导致 N 个平台各扫一遍。
+            result = self._compute_event_intermediates(
+                workspace_root,
+                profiles,
+                enriched_profiles,
+                event,
+                source_user_ids,
+                profile_limit,
+                use_llm=use_llm,
+            )
+            _EVENT_INTERMEDIATE_CACHE[key] = result
+            _EVENT_INTERMEDIATE_CACHE.move_to_end(key)
+            while len(_EVENT_INTERMEDIATE_CACHE) > _EVENT_INTERMEDIATE_MAX:
+                _EVENT_INTERMEDIATE_CACHE.popitem(last=False)
+        return result
+
+    def compute_event_intermediates(
+        self,
+        workspace_root: str | Path,
+        event: "ParsedEvent",
+        profile_limit: int | None = None,
+        use_llm: bool = False,
+    ) -> dict[str, Any]:
+        """主线程预计算：与平台无关的全量中间结果（关键词 fuzzy / BGE / 命中数）。
+
+        多平台分发时由主线程调用一次（独占 GIL，约 1s），结果注入各平台线程，
+        避免 N 个 worker 在 GIL 下并发重算、彼此拖慢到 ~数倍墙钟。
+        """
+        loader = DataLoader(workspace_root, product_name=self.product_name)
+        profiles = loader.load_profiles(limit=profile_limit)
+        try:
+            enriched_profiles = loader.load_enriched_graph_attributes(limit=profile_limit)
+        except (JSONDecodeError, ValueError):
+            enriched_profiles = {}
+        try:
+            source_user_ids = set(
+                loader.load_interactions(limit_sources=None, limit_records_per_source=0).keys()
+            )
+        except (JSONDecodeError, ValueError):
+            source_user_ids = set()
+        return self._get_event_intermediates(
+            workspace_root=workspace_root,
+            profiles=profiles,
+            enriched_profiles=enriched_profiles,
+            event=event,
+            source_user_ids=source_user_ids,
+            profile_limit=profile_limit,
+            use_llm=use_llm,
         )
 
     def recall_candidates(
@@ -235,6 +414,9 @@ class FeatureBuilder:
         size: int = 200,
         source_user_ids: set[str] | None = None,
         workspace_root: str | Path | None = None,
+        # 跨平台优化：调用方已算好的、与平台无关的输入，避免每个平台重复扫描 35k 节点。
+        kw_hits_map: dict[str, int] | None = None,
+        semantic_map: dict[str, float] | None = None,
     ) -> set[str]:
         """召回与事件最相关的 size 个 user_id（单一混合排序，不再分桶）。
 
@@ -285,20 +467,24 @@ class FeatureBuilder:
             made = int(getattr(target_ga, "made_interaction_count", 0)) if target_ga else 0
             followers = int(p.user_followers)
             friends = int(p.user_friends)
-            # 预拼接一次，避免对每个关键词都重新遍历 interests 列表；单 token 关键词
-            # 下 ``k in interests_blob`` 与原 ``any(k in i for i in interests)`` 完全等价。
-            desc_blob = p.user_description or ""
-            interests_blob = " ".join(p.user_interests)
-            kw_hits = 0
-            for k in keywords:
-                if not k:
-                    continue
-                if " " in k:
-                    # 极少数多词关键词：退回逐条 interests 判定，与原逻辑完全一致。
-                    if k in desc_blob or any(k in i for i in p.user_interests):
+            if kw_hits_map is not None:
+                # 跨平台共享路径：关键词命中数已由调用方一次性算好，直接查表。
+                kw_hits = int(kw_hits_map.get(uid, 0))
+            else:
+                # 预拼接一次，避免对每个关键词都重新遍历 interests 列表；单 token 关键词
+                # 下 ``k in interests_blob`` 与原 ``any(k in i for i in interests)`` 完全等价。
+                desc_blob = p.user_description or ""
+                interests_blob = " ".join(p.user_interests)
+                kw_hits = 0
+                for k in keywords:
+                    if not k:
+                        continue
+                    if " " in k:
+                        # 极少数多词关键词：退回逐条 interests 判定，与原逻辑完全一致。
+                        if k in desc_blob or any(k in i for i in p.user_interests):
+                            kw_hits += 1
+                    elif k in desc_blob or k in interests_blob:
                         kw_hits += 1
-                elif k in desc_blob or k in interests_blob:
-                    kw_hits += 1
             is_source = uid in source_set
             # role_hint == "interaction_response" 的代理：is_source 或 高活动度
             is_interaction_like = is_source or (received + made) >= 50
@@ -320,11 +506,13 @@ class FeatureBuilder:
             )
 
         # ---- 混合排序：关键词命中优先，语义相关度兜底 ----
-        semantic_map = self._recall_semantic_scores(
-            workspace_root=workspace_root,
-            user_ids=[item["user_id"] for item in items],
-            event=event,
-        )
+        if semantic_map is None:
+            semantic_map = self._recall_semantic_scores(
+                workspace_root=workspace_root,
+                user_ids=[item["user_id"] for item in items],
+                event=event,
+            )
+        # `semantic_map` 已存在（跨平台共享路径），直接复用，跳过重复语义计算。
 
         def rank_key(item: dict[str, Any]) -> tuple[Any, ...]:
             return (
@@ -412,6 +600,9 @@ class FeatureBuilder:
         *,
         recall_user_ids: set[str] | None = None,
         recall_mode: Literal["platform_aware"] | None = None,
+        matched_keywords_map: dict[str, list[str]] | None = None,
+        semantic_profile_map: dict[str, str] | None = None,
+        semantic_map: dict[str, float] | None = None,
     ) -> FeatureBuildResult:
         enriched_profiles = enriched_profiles or {}
         source_user_ids = source_user_ids or set()
@@ -686,22 +877,27 @@ class FeatureBuilder:
         source_ids = source_user_ids
         user_ids_ordered = df["user_id"].tolist()
 
-        matched_list: list[list[str]] = []
-        semantic_profiles: list[str] = []
-        for uid in user_ids_ordered:
-            profile = profile_by_id[uid]
-            matched_list.append(
-                self._match_keywords(
-                    profile=profile, normalized_keywords=normalized_keywords
+        if matched_keywords_map is not None and semantic_profile_map is not None:
+            # 跨平台共享路径：直接用一次性算好的全量表，跳过 35k 的 fuzzy 匹配与文本拼接。
+            matched_list = [matched_keywords_map.get(uid, []) for uid in user_ids_ordered]
+            semantic_profiles = [semantic_profile_map.get(uid, "") for uid in user_ids_ordered]
+        else:
+            matched_list = []
+            semantic_profiles = []
+            for uid in user_ids_ordered:
+                profile = profile_by_id[uid]
+                matched_list.append(
+                    self._match_keywords(
+                        profile=profile, normalized_keywords=normalized_keywords
+                    )
                 )
-            )
-            semantic_profiles.append(
-                DataLoader.summarize_profile_for_semantics(
-                    profile,
-                    enriched_profile=enriched_by_id.get(uid),
-                    is_interaction_source=uid in source_ids,
+                semantic_profiles.append(
+                    DataLoader.summarize_profile_for_semantics(
+                        profile,
+                        enriched_profile=enriched_by_id.get(uid),
+                        is_interaction_source=uid in source_ids,
+                    )
                 )
-            )
         df["matched_keywords"] = matched_list
         df["keyword_hit_count"] = df["matched_keywords"].apply(len).astype(np.int64)
         if kw_count:
@@ -810,16 +1006,18 @@ class FeatureBuilder:
         potential_arr = np.zeros(len(user_id_arr), dtype=np.float64)
         semantic_rank_arr = np.zeros(len(user_id_arr), dtype=np.float64)
         if local_models is not None:
-            # ``build_event_text`` 只编码 1 条话题，随后一次矩阵乘法覆盖全部节点。
-            semantic_map = local_models.semantic_scores(build_event_text(event))
             potential_map = local_models.graph_potentials()
-            semantic_arr = np.fromiter(
-                (semantic_map.get(str(uid), 0.0) for uid in user_id_arr),
+            potential_arr = np.fromiter(
+                (potential_map.get(str(uid), 0.0) for uid in user_id_arr),
                 dtype=np.float64,
                 count=len(user_id_arr),
             )
-            potential_arr = np.fromiter(
-                (potential_map.get(str(uid), 0.0) for uid in user_id_arr),
+            # 跨平台共享路径：semantic_map 由调用方一次性算好（全库一次矩阵乘法），
+            # 这里直接复用，跳过重复语义计算；未提供时再退化为本地计算。
+            if semantic_map is None:
+                semantic_map = local_models.semantic_scores(build_event_text(event))
+            semantic_arr = np.fromiter(
+                (semantic_map.get(str(uid), 0.0) for uid in user_id_arr),
                 dtype=np.float64,
                 count=len(user_id_arr),
             )

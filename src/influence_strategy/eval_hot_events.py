@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import itertools
 import json
 import logging
+import os
 import random
 import shutil
 import threading
@@ -11,8 +13,8 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable, Literal, Sequence
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from typing import Any, Callable, Iterator, Literal, Sequence
 
 from .content_arsenal import (
     AmmoVectorIndex,
@@ -28,7 +30,14 @@ from .models import (
     StrategyNodePlan,
     StrategyResult,
 )
-from .pipeline import PipelineArtifacts, StrategyPipeline
+from .pipeline import (
+    PipelineArtifacts,
+    StrategyPipeline,
+    LLM_IN_EVENT_PARSER,
+    LLM_IN_FEATURE_BUILDER,
+)
+from .feature_builder import FeatureBuilder
+from .event_parser import RuleBasedEventParser
 from .platform_dispatcher import PlatformSpec
 from .platform_profiles import (
     DATASET_PLATFORM_VALUES,
@@ -753,7 +762,8 @@ def _run_single_platform_evaluation(
     output_dir: Path,
     trace_dir: Path,
     hot_event: dict[str, Any],
-    spec: PlatformSpec,
+    platform_key: str,
+    requested_count: int,
     profile_limit: int | None,
     risk_level: str | None,
     campaign_window_hours: int,
@@ -764,12 +774,15 @@ def _run_single_platform_evaluation(
     water_army_count: int = 0,
     recall_size: int,
     recall_mode: str,
+    # 跨平台优化：主线程预计算、与平台无关的全量中间结果，注入后避免各进程重算 35k。
+    event_intermediates: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """单条平台任务：一次独立的多人协同分发（在独立线程中执行）。
+    """单条平台任务：一次独立的多人协同分发（在独立进程中执行）。
 
     直接复用 :func:`_run_hot_event_evaluation`，把输入拆成该平台的「多人协同」任务：
     ``dispatch_platform=平台``、``max_selected_nodes=该平台目标人数``。产出与单平台
     多人协同**完全同构** 的五维调度策略（含动作清单），供上层整合成多平台结果。
+    参数为纯标量（不走 pydantic 对象），便于跨进程 pickle。
     """
     root = Path(workspace_root)
     client = None
@@ -784,7 +797,7 @@ def _run_single_platform_evaluation(
         output_dir=output_dir,
         hot_event=hot_event,
         profile_limit=profile_limit,
-        max_selected_nodes=spec.requested_count,
+        max_selected_nodes=requested_count,
         risk_level=risk_level,
         campaign_window_hours=campaign_window_hours,
         max_frequency_per_day=max_frequency_per_day,
@@ -792,11 +805,12 @@ def _run_single_platform_evaluation(
         use_llm=use_llm,
         llm_client=client,
         trace_dir=trace_dir,
-        dispatch_platform=spec.platform_key,
+        dispatch_platform=platform_key,
         water_army_enabled=water_army_enabled,
         water_army_count=water_army_count,
         recall_size=recall_size,
         recall_mode=recall_mode,
+        event_intermediates=event_intermediates,
     )
 
     strategy = platform_payload.get("五维调度策略", {})
@@ -805,8 +819,8 @@ def _run_single_platform_evaluation(
         target.get("选取数字人id组", []) if isinstance(target, dict) else []
     )
     return {
-        "平台": spec.platform_key,
-        "目标人数": spec.requested_count,
+        "平台": platform_key,
+        "目标人数": requested_count,
         "选取人数": len(selected_ids),
         "安全等级分布": _aggregate_safety(strategy),
         "stage_times": per_stage,
@@ -815,6 +829,88 @@ def _run_single_platform_evaluation(
         # 特殊支持节点（若有）：逐平台独立生成，随各平台结果一并返回，供跨平台 UI 渲染。
         "特殊支持节点": platform_payload.get("特殊支持节点"),
     }
+
+
+# --------------------------------------------------------------------------- #
+# 跨平台并行：进程池（绕开 GIL）
+# --------------------------------------------------------------------------- #
+# 多平台的各条管线（feature_builder 的 BGE/关键词 fuzzy、event_parser）是 CPU 密集且
+# 持有 GIL 的纯 Python，线程池下被 GIL 串行化（实测 speedup≈1.07，墙钟≈平台数×单平台）。
+# 用常驻进程池让每个平台在独立进程跑，墙钟≈单平台；每个 worker 进程内 DataLoader 有模块级
+# 缓存，35k 画像/富画像只加载校验一次（等价于"共享 preloaded_profiles"，但无需跨进程
+# pickle 35k 对象），从而同时获得"真并行"与"不重复加载"。进程池惰性创建、跨请求常驻复用。
+_PLATFORM_POOL: "ProcessPoolExecutor | ThreadPoolExecutor | None" = None
+_PLATFORM_POOL_LOCK = threading.Lock()
+
+
+def _get_platform_pool() -> "ProcessPoolExecutor | ThreadPoolExecutor":
+    """惰性创建并复用跨平台进程池；创建失败则回退线程池，保证接口可用。"""
+    global _PLATFORM_POOL
+    if _PLATFORM_POOL is None:
+        with _PLATFORM_POOL_LOCK:
+            if _PLATFORM_POOL is None:
+                n = max(1, min(os.cpu_count() or 4, 4))
+                try:
+                    _PLATFORM_POOL = ProcessPoolExecutor(max_workers=n)
+                except Exception as _exc:  # noqa: BLE001 - 环境不支持进程池时优雅降级
+                    logger.warning("[多平台] 进程池创建失败，回退线程池：%s", _exc)
+                    _PLATFORM_POOL = ThreadPoolExecutor(max_workers=n)
+    return _PLATFORM_POOL
+
+
+@contextlib.contextmanager
+def _platform_pool() -> "Iterator[ProcessPoolExecutor | ThreadPoolExecutor]":
+    """上下文管理器包装：复用常驻进程池，且退出时不关闭（供后续请求继续复用）。"""
+    yield _get_platform_pool()
+
+
+def _warm_worker(workspace_root: "str | Path") -> bool:
+    """worker 进程内预热：加载 35k 画像/富画像/交互（模块级缓存，按 product_name 命中同一键）。
+
+    这样首个真实跨平台请求的各 worker 已是热路径，避免首请求冷启动把 35k 加载算进墙钟
+    （实测首请求曾达 ~15s）。失败静默返回 False，不影响主流程。
+    """
+    try:
+        from .data_loader import DataLoader
+
+        loader = DataLoader(workspace_root, product_name="abc_reading")
+        loader.load_profiles()
+        try:
+            loader.load_enriched_graph_attributes()
+        except Exception:  # noqa: BLE001 - 富画像缺失不影响其余功能
+            pass
+        try:
+            loader.load_interactions(limit_sources=None, limit_records_per_source=0)
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("[多平台预热] worker 预热失败：%s", _e)
+        return False
+    logger.info("[多平台预热] worker 预热成功")
+    return True
+
+
+def _warm_platform_pool(workspace_root: "str | Path") -> None:
+    """在 worker 进程里预热 35k 数据（每个 worker 加载一次），让首个跨平台请求直接进入热路径。
+
+    在 web_app 启动钩子里调用，把冷启动成本从「首个运行请求」挪到「服务启动」时。
+    失败静默跳过，绝不阻断服务启动。
+    """
+    try:
+        pool = _get_platform_pool()
+        n = getattr(pool, "_max_workers", None) or 1
+        logger.info("[多平台预热] 开始预热 %d 个 worker（startup）", n)
+        futures = [pool.submit(_warm_worker, workspace_root) for _ in range(n)]
+        ok = 0
+        for fut in futures:
+            try:
+                if fut.result(timeout=120):
+                    ok += 1
+            except Exception as _e:  # noqa: BLE001 - 单 worker 预热失败不影响其余
+                logger.warning("[多平台预热] 单 worker 预热异常：%s", _e)
+        logger.info("[多平台预热] 完成：%d/%d worker 成功", ok, n)
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("[多平台预热] 进程池预热失败：%s", _e)
 
 
 def _run_hot_event_multiplatform_evaluation(
@@ -877,29 +973,61 @@ def _run_hot_event_multiplatform_evaluation(
         recall_mode=recall_mode,
     )
 
+    # 主线程先算好「与平台无关」的 35k 全量中间结果（关键词 fuzzy / BGE / 命中数），
+    # 独占 GIL 一次算完（~1s），再注入各平台线程。否则 N 个 worker 在 GIL 下并发重算、
+    # 互相拖慢，单平台墙钟会被放大到 ~10s（实测：1.1s 单跑 vs 11s 并发）。
+    # 预计算失败则回退为 None，各平台仍走缓存计算，不影响正确性。
+    event_intermediates: dict[str, Any] | None = None
+    try:
+        _mp_payload = hot_event_to_pipeline_payload(
+            hot_event,
+            max_selected_nodes=1,
+            risk_level=risk_level,
+            campaign_window_hours=campaign_window_hours,
+            max_frequency_per_day=max_frequency_per_day,
+            allowed_platforms=allowed_platforms,
+        )
+        _mp_parsed = RuleBasedEventParser(default_product_name="abc_reading").parse(
+            _mp_payload, workspace_root=root, use_llm=LLM_IN_EVENT_PARSER
+        )
+        event_intermediates = FeatureBuilder(product_name="abc_reading").compute_event_intermediates(
+            root, _mp_parsed, profile_limit, LLM_IN_FEATURE_BUILDER
+        )
+    except Exception as _exc:  # 预计算失败不影响正确性，仅损失并行加速
+        logger.warning("[多平台] 主线程预计算中间结果失败，回退为各平台自行计算：%s", _exc)
+        event_intermediates = None
+    common["event_intermediates"] = event_intermediates
+
     # 并行执行：每个平台一条独立多人任务，线程池并发跑完整管线以加快效率。
+    # 记录每个 future 的提交时刻，以便在 result 阶段算出「单平台墙钟耗时」；
+    # per_platform_timing 汇总各平台的墙钟与子阶段，供下方并行度诊断。
     platform_results: list[dict[str, Any] | None] = [None] * len(platform_specs)
     errors: dict[str, str] = {}
-    with ThreadPoolExecutor(max_workers=max(1, len(platform_specs))) as ex:
+    per_platform_timing: list[dict[str, Any]] = []
+    with _platform_pool() as ex:
         future_to_index: dict[Any, int] = {}
+        submit_times: dict[Any, float] = {}
         for i, spec in enumerate(platform_specs):
-            future_to_index[
-                ex.submit(
-                    _run_single_platform_evaluation,
-                    output_dir=Path(output_dir) / spec.platform_key,
-                    trace_dir=Path(trace_dir) / spec.platform_key,
-                    spec=spec,
-                    **common,
-                )
-            ] = i
+            fut = ex.submit(
+                _run_single_platform_evaluation,
+                output_dir=Path(output_dir) / spec.platform_key,
+                trace_dir=Path(trace_dir) / spec.platform_key,
+                platform_key=spec.platform_key,
+                requested_count=spec.requested_count,
+                **common,
+            )
+            future_to_index[fut] = i
+            submit_times[fut] = time.perf_counter()
         for fut in as_completed(future_to_index):
             i = future_to_index[fut]
             spec = platform_specs[i]
+            wall = time.perf_counter() - submit_times[fut]
             try:
-                platform_results[i] = fut.result()
+                result = fut.result()
+                platform_results[i] = result
             except Exception as exc:  # 单平台失败不拖垮整轮
                 errors[spec.platform_key] = str(exc)
-                platform_results[i] = {
+                result = {
                     "平台": spec.platform_key,
                     "目标人数": spec.requested_count,
                     "选取人数": 0,
@@ -913,6 +1041,18 @@ def _run_hot_event_multiplatform_evaluation(
                     "五维调度策略": {},
                     "error": str(exc),
                 }
+                platform_results[i] = result
+            per_platform_timing.append(
+                {
+                    "平台": spec.platform_key,
+                    "墙钟耗时(s)": round(wall, 3),
+                    "子阶段(s)": {
+                        k: round(float(v), 3)
+                        for k, v in (result.get("stage_times") or {}).items()
+                    },
+                }
+            )
+    per_platform_timing.sort(key=lambda x: str(x.get("平台")))
 
     t0 = time.perf_counter()
     output_payload = build_multiplatform_output(
@@ -930,6 +1070,41 @@ def _run_hot_event_multiplatform_evaluation(
     if isinstance(ocr_meta, dict) and ocr_meta.get("ocr_seconds") is not None:
         stage_times["image_recognition"] = float(ocr_meta["ocr_seconds"])
 
+    # ---- 多平台计时汇总：诊断并行度（墙钟 vs 各平台 CPU 之和） ----
+    # speedup_ratio ≈ 1 说明各平台在 GIL 下被串行化（线程并未真正并行）；
+    # ≈ 平台数 说明任务确实并行执行。子阶段之和揭示耗时大头在哪。
+    platform_stage_sums: dict[str, float] = {}
+    sum_pipeline_total = 0.0
+    for pt in per_platform_timing:
+        st = pt.get("子阶段(s)", {})
+        for k, v in st.items():
+            platform_stage_sums[k] = platform_stage_sums.get(k, 0.0) + float(v)
+        sum_pipeline_total += float(st.get("pipeline_total", 0.0))
+    event_total = time.perf_counter() - total_start
+    speedup_ratio = (sum_pipeline_total / event_total) if event_total > 0 else 0.0
+    stage_times["per_platform"] = per_platform_timing
+    stage_times["substage_totals"] = {k: round(v, 3) for k, v in platform_stage_sums.items()}
+    stage_times["sum_pipeline_total"] = round(sum_pipeline_total, 3)
+    stage_times["event_total"] = round(event_total, 3)
+    stage_times["speedup_ratio"] = round(speedup_ratio, 2)
+
+    logger.info(
+        "[多平台计时] 事件=%s 平台数=%d 墙钟=%.2fs 各平台pipeline_total之和=%.2fs "
+        "并行度≈%.2f（≈1=被 GIL 串行化，≈平台数=真并行）",
+        hot_event.get("event_id"),
+        len(platform_specs),
+        event_total,
+        sum_pipeline_total,
+        speedup_ratio,
+    )
+    for pt in per_platform_timing:
+        logger.info(
+            "[多平台计时]   平台=%-14s 墙钟=%.2fs 子阶段=%s",
+            str(pt.get("平台")),
+            float(pt.get("墙钟耗时(s)", 0.0)),
+            pt.get("子阶段(s)", {}),
+        )
+
     target_dir = Path(output_dir)
     output_path = (
         target_dir
@@ -941,7 +1116,6 @@ def _run_hot_event_multiplatform_evaluation(
         encoding="utf-8",
     )
 
-    stage_times["event_total"] = time.perf_counter() - total_start
     return output_path, output_payload, stage_times
 
 
@@ -3053,6 +3227,8 @@ def _run_hot_event_evaluation(
     water_army_count: int = 0,
     recall_size: int = 200,
     recall_mode: Literal["platform_aware"] = "platform_aware",
+    # 跨平台优化：主线程预计算好、与平台无关的全量中间结果，注入后避免各线程重算 35k。
+    event_intermediates: dict[str, Any] | None = None,
 ) -> tuple[Path, dict[str, Any], dict[str, float]]:
     root = Path(workspace_root)
     stage_times: dict[str, float] = {}
@@ -3105,6 +3281,7 @@ def _run_hot_event_evaluation(
         recall_size=effective_recall_size,
         recall_mode=effective_recall_mode,
         include_user_ids=include_user_ids,
+        event_intermediates=event_intermediates,
     )
     # 把 pipeline 子键展开成顶层键，便于压测面板直接拿 event_parser/feature_builder/...
     for key, value in artifacts.stage_times.items():

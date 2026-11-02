@@ -1,7 +1,7 @@
-import type { BenchmarkSummary } from "../types";
+import type { TestRunSummary } from "../types";
 
 /**
- * 5 次压测汇总视图：
+ * 阶段耗时汇总视图（总体测试复用）：
  *
  *   - 顶部"每轮总用时"柱状图（per-iteration wall time）；
  *   - 中部"各阶段平均用时"柱状图，含最小 / 最大范围条；
@@ -10,7 +10,7 @@ import type { BenchmarkSummary } from "../types";
  * 柱状图用纯 SVG 实现（不引入 chart 依赖），柱高度按最大值等比缩放；条数随
  * 阶段数自适应。
  */
-export function BenchmarkSummaryView({ summary }: { summary: BenchmarkSummary }) {
+export function BenchmarkSummaryView({ summary }: { summary: TestRunSummary }) {
   const stageEntries = Object.entries(summary.stage_averages ?? {})
     .filter(([, seconds]) => Number.isFinite(seconds) && seconds >= 0)
     .sort(([, left], [, right]) => right - left);

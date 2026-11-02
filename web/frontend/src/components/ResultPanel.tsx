@@ -5,6 +5,7 @@ import { platformLabel, platformModeLabel } from "../lib/platforms";
 import { DataTable } from "./DataTable";
 import { SectionTitle } from "./SectionTitle";
 import SupportNodePanel from "./SupportNodePanel";
+import { NodeBadge, NodeModal } from "./NodeBadge";
 
 /** 数字人原始 id → 统一编号（D01…）的映射，用于把所有出现处的原始 id 收敛成编号。 */
 function buildIdMap(division: Array<Record<string, unknown>>): Record<string, string> {
@@ -324,7 +325,12 @@ function SingleTargetDetail({
         <div className="summary-band">
           <div>
             <span>目标数字人</span>
-            <strong>{String(targetDispatch?.target_user_id ?? diag.target_user_id ?? "-")}</strong>
+            <strong>
+              <NodeBadge
+                userId={String(targetDispatch?.target_user_id ?? diag.target_user_id ?? "")}
+                label={String(targetDispatch?.target_user_id ?? diag.target_user_id ?? "-")}
+              />
+            </strong>
           </div>
           <div>
             <span>所属平台</span>
@@ -372,6 +378,8 @@ function FiveDimension({ payload }: { payload: Record<string, unknown> }) {
   const division =
     (target?.["数字人分工"] as Array<Record<string, unknown>> | undefined) ?? [];
   const idMap = buildIdMap(division);
+  const noToId: Record<string, string> = {};
+  for (const [id, no] of Object.entries(idMap)) noToId[no] = id;
   const platformSchemes =
     (platform?.["各平台方案"] as Array<Record<string, unknown>> | undefined) ?? [];
   const stageStats =
@@ -394,6 +402,8 @@ function FiveDimension({ payload }: { payload: Record<string, unknown> }) {
   );
   const actions =
     (content?.["动作清单"] as Array<Record<string, unknown>> | undefined) ?? [];
+  // 点击职责卡后弹出的「数据库原始信息」模态框，触发前不发起任何查询。
+  const [rawUserId, setRawUserId] = useState<string | null>(null);
 
   return (
     <>
@@ -403,10 +413,10 @@ function FiveDimension({ payload }: { payload: Record<string, unknown> }) {
         <p>{String(target?.["传播目标"] ?? "-")}</p>
         <div className="id-row">
           {selectedIds.map((id) => (
-            <span key={id}>{idMap[id] ?? id}</span>
+            <NodeBadge key={id} userId={id} label={idMap[id] ?? id} />
           ))}
         </div>
-        <RoleView humans={division} />
+        <RoleView humans={division} onShowRaw={setRawUserId} />
       </section>
 
       {/* 时间维度：阶段统计（含时期—窗口）与每人数身份（角色）。 */}
@@ -419,7 +429,7 @@ function FiveDimension({ payload }: { payload: Record<string, unknown> }) {
       {/* 频率维度：单独占一行，精简为「编号 · 条/天」。 */}
       <section className="result-section">
         <h3>频率（条/天）</h3>
-        <FrequencyView items={frequencyItems} />
+        <FrequencyView items={frequencyItems} idByNumber={noToId} />
       </section>
 
       <section className="result-section">
@@ -445,6 +455,7 @@ function FiveDimension({ payload }: { payload: Record<string, unknown> }) {
         <h3>动作清单（按阶段分组）</h3>
         <ActionListView actions={actions} />
       </section>
+      <NodeModal userId={rawUserId} onClose={() => setRawUserId(null)} />
     </>
   );
 }
@@ -486,8 +497,10 @@ function ModuleTimes({ times }: { times: Record<string, number> }) {
  */
 function RoleView({
   humans,
+  onShowRaw,
 }: {
   humans: Array<Record<string, unknown>>;
+  onShowRaw?: (userId: string) => void;
 }) {
   if (!humans.length) {
     return <div className="empty-table">无数字人</div>;
@@ -498,7 +511,12 @@ function RoleView({
         const no = String(h["数字人编号"] ?? "-");
         const id = String(h["数字人id"] ?? "-");
         return (
-          <div className="role-card" key={`${no}-${id}`}>
+          <div
+            className="role-card"
+            key={`${no}-${id}`}
+            onClick={() => onShowRaw?.(id)}
+            title="点击查看数据库原始信息"
+          >
             <div className="role-card-head">
               <span className="role-no">{no}</span>
               <span className="role-name">{String(h["角色"] ?? "-")}</span>
@@ -558,8 +576,10 @@ function StageStatView({
  */
 function FrequencyView({
   items,
+  idByNumber,
 }: {
   items: Array<Record<string, unknown>>;
+  idByNumber?: Record<string, string>;
 }) {
   if (!items.length) {
     return <div className="empty-table">无频率信息</div>;
@@ -577,7 +597,7 @@ function FrequencyView({
           .join(" ");
         return (
           <div className="freq-row" key={no}>
-            <span className="freq-no">{no}</span>
+            <NodeBadge userId={idByNumber?.[no] ?? no} label={no} className="freq-no" />
             <span className="freq-rate">
               {perDay != null
                 ? `${
@@ -717,7 +737,7 @@ function CrossPlatformOverview({ payload }: { payload: Record<string, unknown> }
           <p>以下数字人同时出现在多个平台的选取结果里：</p>
           <div className="id-row">
             {overlaps.map((id) => (
-              <span key={id}>{idMap[id] ?? id}</span>
+              <NodeBadge key={id} userId={id} label={idMap[id] ?? id} />
             ))}
           </div>
         </>
@@ -818,7 +838,7 @@ function PlatformSchemeCard({
           <h3>选取节点</h3>
           <div className="id-row">
             {selectedIds.map((id) => (
-              <span key={id}>{idMap[id] ?? id}</span>
+              <NodeBadge key={id} userId={id} label={idMap[id] ?? id} />
             ))}
           </div>
           <DataTable items={nodeDetailRows} />
