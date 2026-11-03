@@ -86,7 +86,7 @@ export function BaseOptionsForm(props: BaseOptionsFormProps) {
           <input
             type="number"
             min={1}
-            max={20}
+            max={100}
             value={maxSelectedNodes}
             onChange={(event) => setMaxSelectedNodes(Number(event.target.value))}
           />

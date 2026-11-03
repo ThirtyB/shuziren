@@ -58,7 +58,10 @@ _EXECUTOR = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
 class RunOptions(BaseModel):
     profile_limit: int | None = None
-    max_selected_nodes: int = Field(default=5, ge=1, le=20)
+    # 上限 100 与业务模型 EventConstraints.max_selected_nodes 对齐（解析器按此推导
+    # candidate_pool_size / rerank_top_k）。之前 le=20 会令主选人数≥21 时报
+    # "Input should be less than or equal to 20"。
+    max_selected_nodes: int = Field(default=5, ge=1, le=100)
     risk_level: Literal["low", "medium", "high"] | None = None
     campaign_window_hours: int = Field(default=24, ge=1, le=168)
     max_frequency_per_day: int = Field(default=3, ge=1, le=24)

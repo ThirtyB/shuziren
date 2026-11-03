@@ -110,7 +110,10 @@ class EventConstraints(BaseModel):
 
 class EventDispatchPreferences(BaseModel):
     candidate_pool_size: int = Field(default=24, ge=6, le=120)
-    rerank_top_k: int = Field(default=12, ge=3, le=40)
+    # 上限 60 与 event_parser 的实际产出对齐：candidate_pool_size 被 min(60, …) 封顶为 60，
+    # 而 rerank_top_k = min(candidate_pool_size, max_selected_nodes*3) 因此绝对不超过 60。
+    # 之前 le=40 会导致主选人数≥14 时触发 ValidationError。
+    rerank_top_k: int = Field(default=12, ge=3, le=60)
     semantic_weight: float = Field(default=0.35, ge=0.0, le=1.0)
     diversity_weight: float = Field(default=0.20, ge=0.0, le=1.0)
     risk_weight: float = Field(default=0.20, ge=0.0, le=1.0)
