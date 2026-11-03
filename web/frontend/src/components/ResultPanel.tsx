@@ -370,7 +370,6 @@ function FiveDimension({ payload }: { payload: Record<string, unknown> }) {
   const frequency = strategy?.["频率"] as Record<string, unknown> | undefined;
   const platform = strategy?.["平台"] as Record<string, unknown> | undefined;
   const content = strategy?.["内容"] as Record<string, unknown> | undefined;
-  const selectedIds = (target?.["选取数字人id组"] as string[] | undefined) ?? [];
   const division =
     (target?.["数字人分工"] as Array<Record<string, unknown>> | undefined) ?? [];
   const idMap = buildIdMap(division);
@@ -420,11 +419,6 @@ function FiveDimension({ payload }: { payload: Record<string, unknown> }) {
       <section className="result-section">
         <h3>数字人职责</h3>
         <p>{String(target?.["传播目标"] ?? "-")}</p>
-        <div className="id-row">
-          {selectedIds.map((id) => (
-            <NodeBadge key={id} userId={id} label={idMap[id] ?? id} />
-          ))}
-        </div>
         <RoleView humans={division} onShowRaw={setRawUserId} />
       </section>
 
@@ -535,11 +529,22 @@ function RoleView({
   if (!humans.length) {
     return <div className="empty-table">无数字人</div>;
   }
+  // 按数字人编号（D01、D02…）升序展示：后端列表按角色分配顺序生成，
+  // 编号却不按该顺序递增，直接渲染会出现 D02 排在 D01 前面。
+  const sorted = [...humans].sort((a, b) =>
+    String(a["数字人编号"] ?? "").localeCompare(
+      String(b["数字人编号"] ?? ""),
+      undefined,
+      { numeric: true },
+    ),
+  );
   return (
     <div className="role-cards">
-      {humans.map((h) => {
+      {sorted.map((h) => {
         const no = String(h["数字人编号"] ?? "-");
         const id = String(h["数字人id"] ?? "-");
+        // 兼任身份：主角色之外的其它角色，仅做展示，不改变人数与编号。
+        const secondary = (h["兼任角色"] as string[] | undefined) ?? [];
         return (
           <div
             className="role-card"
@@ -555,6 +560,18 @@ function RoleView({
             <div className="role-duty">{String(h["职责说明"] ?? "-")}</div>
             <div className="role-persona">{String(h["人设"] ?? "-")}</div>
             <div className="role-id">数字人id：{id}</div>
+            {secondary.length > 0 && (
+              <div className="role-extra-block">
+                <div className="role-extra-title">兼任身份</div>
+                <div className="role-extra-list">
+                  {secondary.map((role) => (
+                    <span className="role-extra" key={role} title={role}>
+                      {role}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         );
       })}

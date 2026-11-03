@@ -97,6 +97,26 @@ INFLUENCE_FLOOR = 0.35
 TOPIC_FLOOR = 0.15
 
 
+def _launch_score(node: "NodeScore") -> float:
+    """首发排序键：影响力 + 话题匹配度（选人与兼任门槛共用同一把尺子）。"""
+    return node.influence_score + node.topic_match_score
+
+
+def _diffusion_score(node: "NodeScore") -> float:
+    """扩散排序键：传播力。"""
+    return node.diffusion_score
+
+
+def _support_score(node: "NodeScore") -> float:
+    """支持排序键。
+
+    支持节点直接取 ``remaining`` 的前 k 个，而 ``remaining`` 保持 scorer 的全局
+    排序（eligible → final_score → topic → influence → -risk），因此等价于按
+    ``final_score`` 降序。兼任门槛用同一口径即可复现。
+    """
+    return node.final_score
+
+
 def rebalance_selected_roles(
     selected_nodes: list[SelectedNode],
 ) -> list[SelectedNode]:
@@ -261,29 +281,48 @@ class Selector:
 
         remaining: list[NodeScore] = list(tiered_pool)
         picks: dict[str, list[NodeScore]] = {}
+        # 每个角色的"准入门槛" = 该角色已选组内按同一排序键算出的最低分。
+        # 必须在选人当场记录：互动排序键依赖"当时 remaining 池的最大评论数"，
+        # 事后重算分母已变，算出来的分与选人时的不是同一把尺子。
+        # 键为角色，值为 (打分函数, 门槛)。
+        role_gates: dict[str, tuple[Any, float]] = {}
+
+        def record_gate(role: str, score_key: Any, members: list[NodeScore]) -> None:
+            if not members:
+                return
+            role_gates[role] = (score_key, min(score_key(node) for node in members))
 
         # ① 首发：影响力 + 话题匹配度，两者都过线优先，人数不够再逐级降级
         picks["core_publish_node"] = self._pick_launch_nodes(
             remaining, quotas["core_publish_node"]
         )
+        record_gate("core_publish_node", _launch_score, picks["core_publish_node"])
 
         # ② 扩散：从剩下的人里按传播力取
         remaining = self._without(remaining, picks["core_publish_node"])
         picks["amplification_node"] = self._pick_top(
-            remaining, quotas["amplification_node"], lambda node: node.diffusion_score
+            remaining, quotas["amplification_node"], _diffusion_score
         )
+        record_gate("amplification_node", _diffusion_score, picks["amplification_node"])
 
         # ③ 互动：活跃度 + 归一化评论数
         remaining = self._without(remaining, picks["amplification_node"])
+        interaction_key = self._interaction_score(remaining)
         picks["interaction_response_node"] = self._pick_top(
             remaining,
             quotas["interaction_response_node"],
-            self._interaction_score(remaining),
+            interaction_key,
+        )
+        record_gate(
+            "interaction_response_node",
+            interaction_key,
+            picks["interaction_response_node"],
         )
 
         # ④ 支持：最后剩下的人
         remaining = self._without(remaining, picks["interaction_response_node"])
         picks["support_node"] = remaining[: quotas["support_node"]]
+        record_gate("support_node", _support_score, picks["support_node"])
 
         selected_nodes: list[SelectedNode] = []
         for role in ROLE_ASSIGN_ORDER:
@@ -296,6 +335,8 @@ class Selector:
                         forced_role=role,
                     )
                 )
+        # 多身份分配：人数、主角色、配额一律不动，只为名单里的人追加兼任身份。
+        self._assign_secondary_roles(selected_nodes, role_gates)
         used_ids = {node.user_id for node in selected_nodes}
 
         # fallback 数量与 max_selected 挂钩（最多 max_selected*2，下限 5）。
@@ -335,6 +376,9 @@ class Selector:
             fallback_count=len(fallback_nodes),
             selected_role_distribution=dict(role_distribution),
             selected_stage_distribution=dict(stage_distribution),
+            role_thresholds={
+                role: round(gate[1], 6) for role, gate in role_gates.items()
+            },
             avg_selected_final_score=round(
                 sum(node.final_score for node in selected_nodes) / max(len(selected_nodes), 1),
                 6,
@@ -352,6 +396,55 @@ class Selector:
         )
 
     # ---------------- 多人协同身份分配 ----------------
+
+    def _assign_secondary_roles(
+        self,
+        selected_nodes: list[SelectedNode],
+        role_gates: dict[str, tuple[Any, float]],
+    ) -> None:
+        """给已选名单追加兼任身份（只增不改，不改变人数与主角色）。
+
+        判定依据是「角色准入门槛」——该角色已选组内按同一排序键算出的最低分。
+        因此该角色自己的人天然满足，无需额外常量阈值，也不会出现
+        "首发达不到首发门槛"的自相矛盾。
+
+        三条规则：
+
+        * 主发布节点 **不参与** 兼任追加：首发配额恒 >= 1 且有第三档兜底，
+          首发位从不缺口；唯一能触发 core 兼任的路径是跨档补位把门槛拉到极低，
+          会产生"比首发者更优的人没当首发却兼任首发"的悖论，无业务价值。
+        * 支持组为空（人数 N <= 4 时配额给不到支持）→ 让综合分最低的那位
+          兼任支持身份，保证四类角色都有人；
+        * 其余情况严格按门槛判定：达标就追加，未达标不追加。
+
+        追加顺序按 ``ROLE_ASSIGN_ORDER``（首发 → 扩散 → 互动 → 支持），
+        与选人顺序一致，因此兼任结果可稳定复现。
+        """
+
+        # 单人场景没有分工可言，不追加兼任身份。
+        if len(selected_nodes) <= 1:
+            return
+
+        # 支持组为空：把最"尾部"的人补成支持节点——他本来就承担长尾承接职责，
+        # 用最低分者兼任比强行提高支持配额更符合业务直觉。
+        if "support_node" not in role_gates:
+            tail = min(selected_nodes, key=_support_score)
+            if tail.selected_role != "support_node":
+                tail.secondary_roles.append("support_node")
+
+        for node in selected_nodes:
+            for role in ROLE_ASSIGN_ORDER:
+                # 主发布节点不参与兼任追加（见类 docstring 说明）。
+                if role == "core_publish_node":
+                    continue
+                gate = role_gates.get(role)
+                if gate is None:
+                    continue
+                if role == node.selected_role or role in node.secondary_roles:
+                    continue
+                score_key, threshold = gate
+                if score_key(node) >= threshold:
+                    node.secondary_roles.append(role)
 
     def _role_quotas(self, total: int) -> dict[str, int]:
         """按占比切分各身份人数。
@@ -415,16 +508,13 @@ class Selector:
           3) 不看门槛 —— 兜底，保证人数一定凑得齐。
         """
 
-        def score(node: NodeScore) -> float:
-            return node.influence_score + node.topic_match_score
-
         tiers = [
             lambda n: n.influence_score > INFLUENCE_FLOOR
             and n.topic_match_score > TOPIC_FLOOR,
             lambda n: n.influence_score > INFLUENCE_FLOOR,
             lambda n: True,
         ]
-        return self._pick_by_tiers(pool, count, score, tiers)
+        return self._pick_by_tiers(pool, count, _launch_score, tiers)
 
     def _pick_top(self, pool: list[NodeScore], count: int, score_key) -> list[NodeScore]:
         """按单一指标取 top count。"""

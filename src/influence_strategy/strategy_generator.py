@@ -107,6 +107,16 @@ class StrategyGenerator:
             explainability=explainability,
         )
 
+        # 兼任者频次按角色求和后可能超过原始单节点上限：把「频率上限」修正为
+        # 实际出现的最高个人频次，避免输出里"上限 3 / 条每天 4"自相矛盾。
+        actual_daily_cap = max(
+            (item.frequency_per_day for item in selected_nodes), default=0
+        )
+        if actual_daily_cap > strategy.frequency_plan.global_cap_per_day:
+            strategy.frequency_plan.global_cap_per_day = actual_daily_cap
+            if "overlap_frequency_summed" not in strategy.frequency_plan.notes:
+                strategy.frequency_plan.notes.append("overlap_frequency_summed")
+
         # 推导整体状态：
         #   * selected_count == 0  →  no_eligible_nodes
         #   * 有主选 + 需要人工复核  →  manual_required
@@ -351,7 +361,7 @@ class StrategyGenerator:
         # 都会让消费者误以为它们会"待命执行"，是组装错误。
         if bucket == "primary":
             timing_window = time_plan.get(node.dispatch_stage, "")
-            frequency = self._frequency_for_role(node.selected_role, frequency_plan)
+            frequency = self._frequency_for_node(node, frequency_plan)
             recommended_action = self._recommended_action(node.selected_role, bucket)
             suggested_content_style = self._content_style_for_role(node.selected_role, content_plan)
             selected_role = node.selected_role
@@ -385,6 +395,7 @@ class StrategyGenerator:
             selection_rank=node.selection_rank,
             selection_bucket=bucket,
             selected_role=selected_role,
+            secondary_roles=list(getattr(node, "secondary_roles", []) or []),
             dispatch_stage=dispatch_stage,
             dispatch_priority=dispatch_priority,
             final_score=node.final_score,
@@ -566,18 +577,25 @@ class StrategyGenerator:
         }
         return goal_map.get(target_goal, target_goal or "形成可执行的影响力事件分发策略。")
 
-    def _frequency_for_role(
+    def _frequency_for_node(
         self,
-        selected_role: str,
+        node: SelectedNode,
         frequency_plan: StrategyFrequencyPlan,
     ) -> int:
+        """该节点每日频次 = 其承担的全部角色频次之和。
+
+        兼任者按角色求和（承担两个身份就执行两份频次），因此结果可能超过
+        ``max_frequency_per_day``。调用方会用实际最高值修正
+        ``frequency_plan.global_cap_per_day``，避免"上限写着 3 却输出 4"的矛盾。
+        """
         mapping = {
             "core_publish_node": frequency_plan.core_publish_node_per_day,
             "interaction_response_node": frequency_plan.interaction_response_node_per_day,
             "amplification_node": frequency_plan.amplification_node_per_day,
             "support_node": frequency_plan.support_node_per_day,
         }
-        return mapping.get(selected_role, 1)
+        roles = [node.selected_role, *node.secondary_roles]
+        return sum(mapping.get(role, 1) for role in roles)
 
     def _recommended_action(self, selected_role: str, bucket: str) -> str:
         base_mapping = {

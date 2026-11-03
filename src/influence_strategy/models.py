@@ -266,6 +266,9 @@ class ScoreResult(BaseModel):
 class SelectedNode(NodeScore):
     selection_rank: int = 0
     selected_role: str = ""
+    # 兼任身份：主角色之外的其它角色，由选人之后的多身份分配追加。
+    # 只增不改——``selected_role`` 永远是主角色，兼任身份不影响人数、配额与去重。
+    secondary_roles: list[str] = Field(default_factory=list)
     dispatch_stage: str = ""
     dispatch_priority: str = "p3"
     selection_bucket: Literal["primary", "fallback"] = "primary"
@@ -279,6 +282,9 @@ class SelectionSummary(BaseModel):
     fallback_count: int
     selected_role_distribution: dict[str, int] = Field(default_factory=dict)
     selected_stage_distribution: dict[str, int] = Field(default_factory=dict)
+    # 各角色的准入门槛（该角色已选组内按同一排序键算出的最低分）：
+    # 选人之后的多身份分配据此判定"是否够格兼任"，同时供输出侧解释。
+    role_thresholds: dict[str, float] = Field(default_factory=dict)
     avg_selected_final_score: float = 0.0
     selection_mode: Literal["automatic", "targeted", "attention"] = "automatic"
     # 多人分发指定的平台（multi_user 模式下候选池只保留该平台的数字人）。
@@ -317,6 +323,8 @@ class StrategyNodePlan(BaseModel):
     selection_rank: int = 0
     selection_bucket: Literal["primary", "fallback"] = "primary"
     selected_role: str
+    # 兼任身份（主角色之外的其它角色）：动作编排按它叠加，频次按它求和。
+    secondary_roles: list[str] = Field(default_factory=list)
     dispatch_stage: str
     dispatch_priority: str = "p3"
     # 是否来自"白库"（低活跃度水军）。水军只做点赞/转发，不计入选人上限。

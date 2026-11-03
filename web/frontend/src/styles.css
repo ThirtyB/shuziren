@@ -866,6 +866,37 @@ h3 {
   font-weight: 700;
   color: #10212f;
 }
+/* 兼任身份标签：与主角色区分（虚线 + 暖色），提示"这个人在其它行动组里也出场"。 */
+/* 兼任身份：放在卡片最下方，独立成块，标签一行最多两个。 */
+.role-extra-block {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px dashed #e6cf95;
+}
+.role-extra-title {
+  margin-bottom: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #7c5a12;
+}
+.role-extra-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 6px;
+}
+.role-extra {
+  font-size: 11px;
+  font-weight: 600;
+  color: #7c5a12;
+  background: #fdf6e3;
+  border: 1px dashed #e6cf95;
+  border-radius: 6px;
+  padding: 1px 6px;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .role-platform {
   margin-left: auto;
   font-size: 12px;

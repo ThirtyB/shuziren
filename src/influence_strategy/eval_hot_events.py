@@ -1641,6 +1641,23 @@ def _count_actions(actions: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
+def _dedupe_nodes(nodes: list[StrategyNodePlan]) -> list[StrategyNodePlan]:
+    """按 ``user_id`` 去重（保持首次出现顺序）。
+
+    多身份下同一个数字人会同时出现在多个角色组里，凡是"按角色组拼接后遍历"
+    的动作生成都必须先去重，否则会给同一条帖子重复点赞或重复发帖。
+    """
+
+    seen: set[str] = set()
+    result: list[StrategyNodePlan] = []
+    for node in nodes:
+        if node.user_id in seen:
+            continue
+        seen.add(node.user_id)
+        result.append(node)
+    return result
+
+
 def _should_skip_like(actor_id: str, target_ref: str, risk_level: str) -> bool:
     """按风险等级概率性取消一次点赞。
 
@@ -1687,9 +1704,11 @@ def _build_staged_node_outputs(
     * 支持期：互动节点以自己的评论内容发帖，扩散 / 支持节点取弹药发帖。
     """
 
+    # 多身份：兼任者会出现在多个角色的行动组里，因此同一时期要执行多套动作。
     by_role: dict[str, list[StrategyNodePlan]] = {}
     for node in selected_nodes:
-        by_role.setdefault(node.selected_role, []).append(node)
+        for role in [node.selected_role, *node.secondary_roles]:
+            by_role.setdefault(role, []).append(node)
     launch_nodes = by_role.get("core_publish_node", [])
     interact_nodes = by_role.get("interaction_response_node", [])
     amplify_nodes = by_role.get("amplification_node", [])
@@ -1814,7 +1833,9 @@ def _build_staged_node_outputs(
     # ② 互动期：非首发节点点赞全部首发帖
     for owner_id, ref, action_id, _score in launch_posts:
         for node in selected_nodes:
-            if node.selected_role == "core_publish_node":
+            # 多身份下"是不是首发"要按实际发帖人判断：兼任首发的人也会发帖，
+            # 但他同样不该点赞自己的帖子（与旧逻辑"首发不点赞自己"等价）。
+            if node.user_id == owner_id:
                 continue
             if _should_skip_like(node.user_id, ref, node.risk_level):
                 continue
@@ -1850,12 +1871,22 @@ def _build_staged_node_outputs(
     # ③ 扩散期：扩散节点转发（一次扩散），优先转发语义分最高的首发帖
     ranked_launch = sorted(launch_posts, key=lambda item: item[3], reverse=True)
     repost1: list[tuple[str, str, str]] = []
-    for index, node in enumerate(amplify_nodes, start=1):
+    repost1_seq = 0
+    for node in amplify_nodes:
         if not ranked_launch:
             break
-        owner_id, src_ref, src_action, _score = ranked_launch[(index - 1) % len(ranked_launch)]
+        # 不转发自己的帖子：从高分到低分挑第一个不属于本节点的主帖。
+        # 若全部主帖都是自己的（名单里只有他一个首发），该动作视为没发生——
+        # 不 emit、不进 repost1，依赖它的点赞因此不会出现，依赖链不会悬空。
+        source = next(
+            (item for item in ranked_launch if item[0] != node.user_id), None
+        )
+        if source is None:
+            continue
+        owner_id, src_ref, src_action, _score = source
         text, score = ammo()[0]
-        ref = f"R{index:03d}"
+        repost1_seq += 1
+        ref = f"R{repost1_seq:03d}"
         repost_text = with_mention(text)
         action = emit(
             node,
@@ -1877,7 +1908,11 @@ def _build_staged_node_outputs(
 
     # ③ 扩散期：其余节点对一次扩散的转发点赞
     for owner_id, ref, action_id in repost1:
-        for node in launch_nodes + interact_nodes + support_nodes:
+        # 多身份下同一人可能同时属于多个角色组，按 user_id 去重后再点赞，
+        # 避免一个人对同一条转发重复点赞；也不点赞自己的转发。
+        for node in _dedupe_nodes(launch_nodes + interact_nodes + support_nodes):
+            if node.user_id == owner_id:
+                continue
             if _should_skip_like(node.user_id, ref, node.risk_level):
                 continue
             emit(
@@ -1893,11 +1928,19 @@ def _build_staged_node_outputs(
 
     # ③ 二次扩散：支持节点转发最相关的一次扩散结果
     repost2: list[tuple[str, str, str]] = []
-    for index, node in enumerate(support_nodes, start=1):
+    repost2_seq = 0
+    for node in support_nodes:
         if not repost1:
             break
-        owner_id, src_ref, src_action = repost1[(index - 1) % len(repost1)]
-        ref = f"S{index:03d}"
+        # 同样不转发自己的转发帖；全部是自己时该动作视为没发生。
+        source = next(
+            (item for item in repost1 if item[0] != node.user_id), None
+        )
+        if source is None:
+            continue
+        owner_id, src_ref, src_action = source
+        repost2_seq += 1
+        ref = f"S{repost2_seq:03d}"
         action = emit(
             node,
             ACTION_REPOST,
@@ -1913,7 +1956,9 @@ def _build_staged_node_outputs(
 
     # ③ 二次扩散后：首发 / 互动 / 扩散节点点赞
     for owner_id, ref, action_id in repost2:
-        for node in launch_nodes + interact_nodes + amplify_nodes:
+        for node in _dedupe_nodes(launch_nodes + interact_nodes + amplify_nodes):
+            if node.user_id == owner_id:
+                continue
             if _should_skip_like(node.user_id, ref, node.risk_level):
                 continue
             emit(
@@ -1929,11 +1974,20 @@ def _build_staged_node_outputs(
 
     # ④ 支持期：互动节点以评论内容发帖，扩散 / 支持节点取弹药发帖
     support_posts: list[tuple[str, str, str]] = []
-    support_publishers = (
-        [(node, comment_text_by_node.get(node.user_id, "")) for node in interact_nodes]
-        + [(node, ammo()[0][0]) for node in amplify_nodes]
-        + [(node, ammo()[0][0]) for node in support_nodes]
-    )
+    # 多身份下同一人可能同时属于互动与扩散：支持期每人只发一条，
+    # 优先用"以评论内容发帖"（互动身份），避免同一个人在同一时期发两条重复帖。
+    support_publishers: list[tuple[StrategyNodePlan, str]] = []
+    _seen_publishers: set[str] = set()
+    for node in interact_nodes:
+        if node.user_id in _seen_publishers:
+            continue
+        _seen_publishers.add(node.user_id)
+        support_publishers.append((node, comment_text_by_node.get(node.user_id, "")))
+    for node in list(amplify_nodes) + list(support_nodes):
+        if node.user_id in _seen_publishers:
+            continue
+        _seen_publishers.add(node.user_id)
+        support_publishers.append((node, ammo()[0][0]))
     for index, (node, text) in enumerate(support_publishers, start=1):
         text = text_or_fallback(text, node, index)
         ref = f"Q{index:03d}"
@@ -2404,15 +2458,22 @@ def _build_five_dimension_strategy(
             node_role_label=node_role_label,
         )
 
+        secondary_roles = list(getattr(node, "secondary_roles", []) or [])
         target_plan.append(
             {
                 "数字人编号": node_number[node.user_id],
                 "数字人id": node.user_id,
                 "角色": node_role_label[node.user_id],
+                # 兼任身份：主角色之外的其它角色（只增不改，不影响人数与主角色）。
+                "兼任角色": [ROLE_LABELS.get(role, role) for role in secondary_roles],
                 "职责说明": ROLE_RESPONSIBILITY.get(node.selected_role, ""),
+                "兼任职责说明": [
+                    ROLE_RESPONSIBILITY.get(role, "") for role in secondary_roles
+                ],
                 "人设": _persona_for_node(node=node, topic_labels=[]),
                 "平台": node.platform or platform,
                 "节点角色": node.selected_role,
+                "兼任节点角色": secondary_roles,
                 "目标受众": target_objects,
             }
         )
@@ -2421,6 +2482,7 @@ def _build_five_dimension_strategy(
                 "数字人编号": node_number[node.user_id],
                 "数字人id": node.user_id,
                 "角色": node_role_label[node.user_id],
+                "兼任角色": [ROLE_LABELS.get(role, role) for role in secondary_roles],
             }
         )
         action_stats = node_output.get("动作统计")
@@ -2529,6 +2591,33 @@ def _build_five_dimension_strategy(
             "传播目标": target,
             "选取数字人id组": selected_ids,
             "数字人分工": target_plan,
+            # 多身份诊断：谁兼任了什么，以及各角色的准入门槛来自哪里。
+            # 门槛 = 该角色已选组内按同一排序键算出的最低分，因此可解释、可复现。
+            "兼任汇总": {
+                "兼任人数": sum(
+                    1 for item in selected_nodes if getattr(item, "secondary_roles", None)
+                ),
+                "角色门槛": {
+                    ROLE_LABELS.get(role, role): round(float(value), 4)
+                    for role, value in (
+                        getattr(strategy_result.selection_summary, "role_thresholds", {})
+                        or {}
+                    ).items()
+                },
+                "兼任明细": [
+                    {
+                        "数字人编号": node_number[item.user_id],
+                        "数字人id": item.user_id,
+                        "主角色": ROLE_LABELS.get(item.selected_role, item.selected_role),
+                        "兼任角色": [
+                            ROLE_LABELS.get(role, role)
+                            for role in item.secondary_roles
+                        ],
+                    }
+                    for item in selected_nodes
+                    if getattr(item, "secondary_roles", None)
+                ],
+            },
         },
         "时间": {
             "传播窗口": strategy_result.strategy.time_plan,
