@@ -290,11 +290,7 @@ function CrossPlatformDetail({
               <strong>{Number(active["选取人数"] ?? 0)}</strong>
             </div>
           </div>
-          <FiveDimension
-            payload={{
-              五维调度策略: active["五维调度策略"] as Record<string, unknown>,
-            }}
-          />
+          <FiveDimension payload={active as Record<string, unknown>} />
           <SupportNodePanel payload={active as Record<string, unknown>} />
         </div>
       ) : null}
@@ -402,6 +398,19 @@ function FiveDimension({ payload }: { payload: Record<string, unknown> }) {
   );
   const actions =
     (content?.["动作清单"] as Array<Record<string, unknown>> | undefined) ?? [];
+
+  // 融合显示模式：把特殊支持节点（水军）的动作并入整体动作清单一起展示。
+  // 这些动作已是 6 列同构格式（数字人编号为 W 开头），与核心动作按「动作分组（时期）」自然归并。
+  const supportActions: Array<Record<string, unknown>> = [];
+  const supportRaw = payload["特殊支持节点"] as
+    | { nodes?: Array<{ actions?: Array<Record<string, unknown>> }> }
+    | undefined;
+  for (const node of supportRaw?.nodes ?? []) {
+    for (const a of node.actions ?? []) supportActions.push(a);
+  }
+  const [fuseSupport, setFuseSupport] = useState(true);
+  const displayActions = fuseSupport ? [...actions, ...supportActions] : actions;
+
   // 点击职责卡后弹出的「数据库原始信息」模态框，触发前不发起任何查询。
   const [rawUserId, setRawUserId] = useState<string | null>(null);
 
@@ -453,7 +462,28 @@ function FiveDimension({ payload }: { payload: Record<string, unknown> }) {
 
       <section className="result-section">
         <h3>动作清单（按阶段分组）</h3>
-        <ActionListView actions={actions} />
+        {supportActions.length > 0 && (
+          <div className="fuse-switch">
+            <span className="fuse-switch-label">显示模式</span>
+            <div className="segmented">
+              <button
+                type="button"
+                className={fuseSupport ? "active" : ""}
+                onClick={() => setFuseSupport(true)}
+              >
+                融合
+              </button>
+              <button
+                type="button"
+                className={!fuseSupport ? "active" : ""}
+                onClick={() => setFuseSupport(false)}
+              >
+                不融合
+              </button>
+            </div>
+          </div>
+        )}
+        <ActionListView actions={displayActions} />
       </section>
       <NodeModal userId={rawUserId} onClose={() => setRawUserId(null)} />
     </>
@@ -760,9 +790,7 @@ function CrossPlatformOverview({ payload }: { payload: Record<string, unknown> }
                   <strong>{Number(p["选取人数"] ?? 0)}</strong>
                 </div>
               </div>
-              <FiveDimension
-                payload={{ 五维调度策略: p["五维调度策略"] as Record<string, unknown> }}
-              />
+              <FiveDimension payload={p as Record<string, unknown>} />
               <SupportNodePanel payload={p as Record<string, unknown>} />
             </section>
           );

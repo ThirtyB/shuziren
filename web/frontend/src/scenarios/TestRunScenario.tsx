@@ -202,9 +202,8 @@ function SubTaskCard({
               <input
                 value={subtask.target_user_id ?? ""}
                 onChange={(e) => onChange({ target_user_id: e.target.value })}
-                placeholder="例如 110133"
+                placeholder="例如110133，必填"
               />
-              <span className="field-hint">目标数字人编号（默认 110133）</span>
             </label>
             {subtask.single_target_mode === "attention" && (
               <label>
@@ -307,7 +306,7 @@ function SubTaskCard({
             checked={!!subtask.water_army_enabled}
             onChange={(e) => onChange({ water_army_enabled: e.target.checked })}
           />
-          特殊支持节点参与（点赞 / 转发）
+          特殊支持节点参与
         </label>
         {subtask.water_army_enabled && (
           <label>

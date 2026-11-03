@@ -158,15 +158,15 @@ export function BaseOptionsForm(props: BaseOptionsFormProps) {
         </label>
       )}
       {showWaterArmy && (
-        <label className="wide">
-          <span className="checkbox-row">
+        <div className="water-army-option wide">
+          <label className="checkbox-row">
             <input
               type="checkbox"
               checked={waterArmyEnabled}
               onChange={(event) => setWaterArmyEnabled(event.target.checked)}
             />
-            特殊支持节点参与（仅点赞 / 转发，不计入选人上限）
-          </span>
+            特殊支持节点参与
+          </label>
           {waterArmyEnabled && (
             <span className="water-army-count">
               支持节点数量
@@ -179,7 +179,7 @@ export function BaseOptionsForm(props: BaseOptionsFormProps) {
               />
             </span>
           )}
-        </label>
+        </div>
       )}
     </div>
   );

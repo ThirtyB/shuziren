@@ -956,6 +956,78 @@ h3 {
   word-break: break-all;
 }
 
+/* 动作清单「融合 / 不融合」显示切换（复用 .segmented 滑动按钮） */
+.fuse-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: #364a5b;
+}
+.fuse-switch-label {
+  font-weight: 600;
+  color: #364a5b;
+}
+
+/* 复选框 + 文案横向排列（如「特殊支持节点参与」），与文字间距适中。
+   必须显式 flex-direction: row，否则会被全局 label 的 column 覆盖成上下两排。 */
+.checkbox-row {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 勾选框：未勾 = 白底描边；勾选 = 绿色底 + 白色对勾 */
+.checkbox-row input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  border: 1px solid #b6c2cc;
+  border-radius: 5px;
+  background: #ffffff;
+  cursor: pointer;
+  position: relative;
+}
+.checkbox-row input[type="checkbox"]:checked {
+  background: #0f766e;
+  border-color: #0f766e;
+}
+.checkbox-row input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 1px;
+  width: 5px;
+  height: 10px;
+  border: solid #ffffff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+/* 特殊支持节点参与区：两行纵向（勾选框一行、数量设置一行），每行按内容宽度不撑满 */
+.water-army-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+/* 第二排：支持节点数量 + 数量框，固定松散排列（不随模式变化） */
+.water-army-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+/* 数量输入框在 content-width 的容器里需给定宽度，避免被全局 input{width:100%} 压没 */
+.water-army-count input {
+  width: 96px;
+}
+
 /* 数字人悬停 / 点击原始信息 */
 .node-badge-wrap {
   position: relative;
@@ -1570,6 +1642,7 @@ details pre {
 
 .picker-search {
   display: flex;
+  flex-direction: row;
   align-items: center;
   gap: 6px;
   border: 1px solid #cdd7df;

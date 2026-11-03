@@ -1340,26 +1340,63 @@ def build_eval_output(
         }
 
     if water_army_nodes:
-        # 特殊支持节点：独立于核心发布节点，单独呈现其选人信息与自身行动清单。
+        # 特殊支持节点编号：用独立的 W 前缀（W01 / W02 …），与核心发布节点的 D 编号区分，
+        # 不撞号且一眼可辨（动作编号本身也是 W 系列）。仅用于专属块展示，不污染核心编号
+        # （核心的 node_number / 数字人分工 / 时间轴保持原样）。
+        support_node_number = {
+            n.user_id: f"W{i + 1:02d}" for i, n in enumerate(water_army_nodes)
+        }
+        # 核心动作索引：把水军动作的「依赖动作」解析成「依赖帖子编号」时需要。
+        # 此处早于下方统一的 all_actions / action_index 构建，故就地从 node_outputs 抽出
+        # 核心节点动作建索引——水军依赖的动作都指向核心 A 系列，能正确解析。
+        core_ids = {n.user_id for n in selected_nodes}
+        core_action_index: dict[str, Any] = {}
+        for _no in node_outputs.values():
+            for _act in (_no.get("动作清单", []) or []):
+                if _act.get("执行主体") in core_ids and _act.get("动作编号"):
+                    core_action_index[_act["动作编号"]] = _act
+
+        # 把每条水军动作渲染成与核心节点一致的 6 列格式（动作编号 / 数字人 / 动作类型 /
+        # 依赖动作编号 / 依赖帖子编号 / 内容编号），使整份调度看起来更真实、与核心视图同构。
+        def _render_support_action(act: dict[str, Any]) -> dict[str, Any]:
+            # 复用与核心节点一致的 6 列渲染（动作编号 / 数字人 / 动作类型 / 依赖动作编号 /
+            # 依赖帖子编号 / 内容编号）。数字人取 W 前缀编号，依赖帖子从核心动作索引解析。
+            row = _minimal_action(
+                act, action_index=core_action_index, node_number=support_node_number
+            )
+            # 特殊支持节点（水军）不发布任何贴文内容（仅点赞 / 转发、文案留空），
+            # 因此内容编号统一留空，避免与核心发布节点的 P/C/R/S/Q 内容编号混淆。
+            row["内容编号"] = ""
+            return row
+
         payload["特殊支持节点"] = {
             "enabled": selection_summary.water_army_enabled,
             "count": selection_summary.water_army_count,
             "platforms": selection_summary.water_army_platforms,
             "core_actor_count": len(selected_nodes),
             "selection": [
-                {"user_id": n.user_id, "platform": n.platform, "risk_level": n.risk_level}
+                {
+                    "数字人编号": support_node_number.get(n.user_id, n.user_id),
+                    "user_id": n.user_id,
+                    "platform": n.platform,
+                    "risk_level": n.risk_level,
+                }
                 for n in water_army_nodes
             ],
             "nodes": [
                 {
+                    "数字人编号": support_node_number.get(n.user_id, n.user_id),
                     "user_id": n.user_id,
                     "platform": n.platform,
                     "risk_level": n.risk_level,
-                    "actions": (node_outputs.get(f"id{n.user_id}", {}) or {}).get("动作清单", []),
+                    "actions": [
+                        _render_support_action(act)
+                        for act in (node_outputs.get(f"id{n.user_id}", {}) or {}).get("动作清单", [])
+                    ],
                 }
                 for n in water_army_nodes
             ],
-            "note": "特殊支持节点仅做点赞 / 转发（无文本）以放大参与人数，不计入选人上限，不与核心发布混排。",
+            "note": "特殊支持节点仅做点赞 / 转发以放大参与人数，不计入选人上限，不与核心发布混排。",
         }
 
     # 主选为空时，把策略整体状态写到 payload 顶层，避免消费者误以为

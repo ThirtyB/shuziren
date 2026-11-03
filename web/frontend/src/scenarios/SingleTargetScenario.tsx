@@ -93,7 +93,7 @@ export function SingleTargetScenario(props: SingleTargetScenarioProps) {
         <input
           value={targetUserId}
           onChange={(event) => setTargetUserId(event.target.value)}
-          placeholder="例如 110133（必填，平台由系统从该数字人画像自动推断）"
+          placeholder="例如110133，必填"
         />
       </label>
 
